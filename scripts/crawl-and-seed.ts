@@ -1,6 +1,9 @@
 /**
- * Crawl sensihi.com, extract content, chunk, embed, and upsert into Supabase.
- * ADMIN-ONLY SCRIPT — never runs in production.
+ * Sensihi Copilot — Crawl & Seed (PRODUCTION)
+ * Crawls sensihi.com, extracts meaningful content,
+ * chunks it, embeds it, and stores reference-grade metadata.
+ *
+ * ⚠️ ADMIN SCRIPT — NEVER RUN IN PROD RUNTIME
  */
 
 import "dotenv/config"
@@ -9,35 +12,51 @@ import { createClient } from "@supabase/supabase-js"
 import { JSDOM } from "jsdom"
 
 /* ----------------------------------
+   Environment
+---------------------------------- */
+
+const {
+  OPENAI_API_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY
+} = process.env
+
+if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  console.error("❌ Missing environment variables")
+  process.exit(1)
+}
+
+/* ----------------------------------
    Config
 ---------------------------------- */
+
 const BASE_URL = "https://sensihi.com"
-const MAX_PAGES = 50                 // safety cap
-const MIN_TEXT_LENGTH = 200
+const MAX_PAGES = 60
+const MIN_TEXT_LENGTH = 250
+
 const CHUNK_SIZE = 800
-const CHUNK_OVERLAP = 100
+const CHUNK_OVERLAP = 120
+
+const EMBEDDING_MODEL = "text-embedding-3-small"
 
 /* ----------------------------------
    Clients
 ---------------------------------- */
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!
-})
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-)
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY })
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 /* ----------------------------------
    Crawl state
 ---------------------------------- */
+
 const visited = new Set<string>()
 const discovered: string[] = []
 
 /* ----------------------------------
    Utilities
 ---------------------------------- */
+
 function normalizeUrl(url: string) {
   return url.replace(/\/$/, "")
 }
@@ -46,19 +65,29 @@ function isInternal(url: string) {
   return url.startsWith(BASE_URL)
 }
 
+function inferType(url: string): "page" | "insight" | "blog" | "case-study" {
+  if (url.includes("/insights/")) return "insight"
+  if (url.includes("/blog")) return "blog"
+  if (url.includes("/case")) return "case-study"
+  return "page"
+}
+
 async function fetchHtml(url: string): Promise<string> {
   const res = await fetch(url, {
     headers: { "User-Agent": "SensihiCrawler/1.0" }
   })
+
   if (!res.ok) {
-    throw new Error(`Failed to fetch ${url} (${res.status})`)
+    throw new Error(`Fetch failed ${res.status}`)
   }
+
   return res.text()
 }
 
 /* ----------------------------------
-   ✅ FIXED LINK EXTRACTION (Framer-safe)
+   Link extraction (Framer-safe)
 ---------------------------------- */
+
 function extractLinks(html: string, currentUrl: string): string[] {
   const dom = new JSDOM(html, { url: currentUrl })
   const anchors = Array.from(dom.window.document.querySelectorAll("a"))
@@ -86,9 +115,10 @@ function extractLinks(html: string, currentUrl: string): string[] {
 }
 
 /* ----------------------------------
-   Text extraction
+   Content extraction
 ---------------------------------- */
-function extractText(html: string): string {
+
+function extractContent(html: string) {
   const dom = new JSDOM(html)
   const doc = dom.window.document
 
@@ -96,16 +126,30 @@ function extractText(html: string): string {
     .querySelectorAll("script,style,nav,footer,header")
     .forEach(el => el.remove())
 
-  return (
-    doc.body.textContent
-      ?.replace(/\s+/g, " ")
-      .trim() || ""
+  const title =
+    doc.querySelector("meta[property='og:title']")?.getAttribute("content") ||
+    doc.querySelector("title")?.textContent ||
+    doc.querySelector("h1")?.textContent ||
+    "Sensihi"
+
+  const paragraphs = Array.from(
+    doc.querySelectorAll("main p, article p")
   )
+    .map(p => p.textContent || "")
+    .join("\n\n")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  return {
+    title: title.trim(),
+    text: paragraphs
+  }
 }
 
 /* ----------------------------------
    Chunking
 ---------------------------------- */
+
 function chunkText(text: string): string[] {
   const chunks: string[] = []
   let i = 0
@@ -121,9 +165,10 @@ function chunkText(text: string): string[] {
 /* ----------------------------------
    Embedding
 ---------------------------------- */
+
 async function embed(text: string): Promise<number[]> {
   const res = await openai.embeddings.create({
-    model: "text-embedding-3-small",
+    model: EMBEDDING_MODEL,
     input: text.slice(0, 8000)
   })
   return res.data[0].embedding
@@ -132,18 +177,18 @@ async function embed(text: string): Promise<number[]> {
 /* ----------------------------------
    Crawl logic
 ---------------------------------- */
+
 async function crawl(url: string) {
   if (visited.has(url)) return
   if (visited.size >= MAX_PAGES) return
 
   visited.add(url)
-  console.log("Crawling:", url)
+  console.log("🔍 Crawling:", url)
 
   let html: string
   try {
     html = await fetchHtml(url)
-  } catch (err) {
-    console.warn("Skip fetch:", url)
+  } catch {
     return
   }
 
@@ -158,11 +203,12 @@ async function crawl(url: string) {
 /* ----------------------------------
    Main
 ---------------------------------- */
-async function main() {
-  console.log("Starting crawl at", BASE_URL)
-  await crawl(normalizeUrl(BASE_URL))
 
-  console.log(`Discovered ${discovered.length} page(s)`)
+async function main() {
+  console.log("🚀 Starting crawl:", BASE_URL)
+
+  await crawl(normalizeUrl(BASE_URL))
+  console.log(`📄 Discovered ${discovered.length} pages`)
 
   for (const url of discovered) {
     let html: string
@@ -172,27 +218,32 @@ async function main() {
       continue
     }
 
-    const text = extractText(html)
+    const { title, text } = extractContent(html)
     if (!text || text.length < MIN_TEXT_LENGTH) continue
 
     const chunks = chunkText(text)
+    const type = inferType(url)
 
     for (const content of chunks) {
       try {
         const embedding = await embed(content)
 
-        await supabase.from("sensihi_documents").upsert({
+        await supabase.from("sensihi_documents").insert({
           content,
           embedding,
-          metadata: { url }
+          metadata: {
+            url,
+            title,
+            type
+          }
         })
       } catch (err) {
-        console.error("Failed to embed chunk from", url)
+        console.error("❌ Embed failed:", url)
       }
     }
   }
 
-  console.log("✅ Crawl + seed complete")
+  console.log("✅ Crawl & seed complete")
 }
 
 main().catch(err => {
