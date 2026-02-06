@@ -1,9 +1,6 @@
 import OpenAI from "openai"
 import { runCopilotV2 } from "../mcp/orchestrator"
 
-export const config = {
-  runtime: "edge"
-}
 
 /* ----------------------------------
    CORS configuration
