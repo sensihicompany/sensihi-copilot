@@ -68,16 +68,24 @@ function isValidReference(meta?: any) {
 function formatAnswer(text: string) {
   if (!text) return text
 
-  return text
-    // Ensure section titles start on new lines
-    .replace(/([A-Za-z][A-Za-z\s]+):\s*/g, "\n$1:\n")
+  let out = text.trim()
 
-    // Force bullets onto new lines
-    .replace(/•\s*/g, "\n• ")
+  // Ensure title is separated
+  out = out.replace(
+    /^([A-Za-z0-9 ,\-()]+):\s*/m,
+    "$1:\n\n"
+  )
 
-    // Clean excessive breaks
-    .replace(/\n{3,}/g, "\n\n")
-    .trim()
+  // Force every bullet onto its own line
+  out = out.replace(/\s*•\s*/g, "\n• ")
+
+  // Add spacing before bullets block
+  out = out.replace(/\n•/g, "\n\n•")
+
+  // Clean up excessive whitespace
+  out = out.replace(/\n{3,}/g, "\n\n")
+
+  return out.trim()
 }
 
 /* ----------------------------------
