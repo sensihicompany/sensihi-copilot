@@ -28,7 +28,7 @@ export function detectUserIntent(message: string) {
    CTA recommendation (MULTI)
 ---------------------------------- */
 
-export function recommendNextActions(intent: string) {
+export function recommendNextAction(intent: string) {
   switch (intent) {
     case "high_intent_buyer":
       return [
