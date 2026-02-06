@@ -8,6 +8,7 @@ import {
 import {
   detectUserIntent,
   recommendNextActions,
+  summarizeForPersona,
 } from "./tools.js"
 import { scoreLead } from "./leadScore.js"
 import { trackEvent } from "./analytics.js"
@@ -19,10 +20,7 @@ import { trackEvent } from "./analytics.js"
 type AIClient = {
   chat: {
     completions: {
-      create: (opts: {
-        model: string
-        messages: Array<{ role: "system" | "user"; content: string }>
-      }) => Promise<{
+      create: (opts: any) => Promise<{
         choices: Array<{ message: { content: string | null } }>
       }>
     }
@@ -81,17 +79,8 @@ function extractReferences(
   return refs.slice(0, 5)
 }
 
-function formatAnswer(text: string): string {
-  if (!text) return ""
-
-  return text
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/•\s?/g, "• ")
-    .trim()
-}
-
 /* ----------------------------------
-   Orchestrator (PRODUCTION)
+   Orchestrator
 ---------------------------------- */
 
 export async function runCopilotV2({
@@ -135,13 +124,13 @@ export async function runCopilotV2({
     .filter(Boolean)
     .join("\n\n")
 
-  // Fallback to last context for follow-ups
   if (!context) {
-    const last = getLastContext(sessionId)
-    if (last) context = last
+    context = getLastContext(sessionId) || ""
   }
 
   if (!context) {
+    updateSessionMemory(sessionId, message)
+
     return {
       message:
         "I don’t have relevant Sensihi information for that yet. Try asking about our solutions, insights, or working with Sensihi.",
@@ -153,8 +142,6 @@ export async function runCopilotV2({
   }
 
   setLastContext(sessionId, context)
-
-  const references = extractReferences(docs)
 
   /* ------------------------------
      4. LLM completion
@@ -170,13 +157,8 @@ export async function runCopilotV2({
           role: "system",
           content: `
 You are Sensihi Copilot.
-
-Rules:
-- Answer ONLY using the provided information.
-- Do NOT invent facts or external knowledge.
-- Write clearly in short paragraphs.
-- Explain concepts in practical business language.
-- Never mention sources or internal mechanics.
+Answer using ONLY the provided information.
+Be clear, practical, and business-focused.
 `,
         },
         ...memory.map((m) => ({
@@ -185,7 +167,7 @@ Rules:
         })),
         {
           role: "user",
-          content: message,
+          content: `Context:\n${context}\n\nQuestion:\n${message}`,
         },
       ],
     })
@@ -193,6 +175,7 @@ Rules:
     answer = completion.choices?.[0]?.message?.content ?? ""
   } catch (err) {
     console.error("OPENAI_FAILED", err)
+
     return {
       message:
         "I’m temporarily unavailable. Please try again in a moment.",
@@ -203,17 +186,15 @@ Rules:
     }
   }
 
-  answer = formatAnswer(answer)
+  if (persona) {
+    answer = summarizeForPersona(answer, persona)
+  }
 
   /* ------------------------------
-     5. Memory update
+     5. Memory + scoring
   ------------------------------ */
 
   updateSessionMemory(sessionId, message)
-
-  /* ------------------------------
-     6. Lead scoring
-  ------------------------------ */
 
   const lead = scoreLead({
     intent,
@@ -221,27 +202,22 @@ Rules:
     askedForDemo: message.toLowerCase().includes("demo"),
   })
 
-  /* ------------------------------
-     7. Analytics (non-blocking)
-  ------------------------------ */
-
   trackEvent({
     type: "copilot_response",
     sessionId,
     intent,
     page,
     leadTier: lead.tier,
-    references: references.length,
   })
 
   /* ------------------------------
-     8. Final response
+     6. Final response
   ------------------------------ */
 
   return {
     message: answer,
     intent,
-    references,
+    references: extractReferences(docs),
     lead,
     cta: recommendNextActions(intent),
   }
