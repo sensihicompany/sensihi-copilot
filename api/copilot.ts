@@ -1,33 +1,37 @@
 import OpenAI from "openai"
-import { runCopilotV2 } from "../mcp/orchestrator"
+import { runCopilotV2 } from "./_mcp/orchestrator"
 
+/* ----------------------------------
+   Runtime (force Node.js)
+---------------------------------- */
+export const runtime = "nodejs"
 
 /* ----------------------------------
    CORS configuration
 ---------------------------------- */
-const ALLOWED_ORIGINS = [
+const ALLOWED_ORIGINS = new Set([
   "https://sensihi.com",
-  "https://www.sensihi.com"
-]
+  "https://www.sensihi.com",
+])
 
-function corsHeaders(origin: string | null) {
+function buildCorsHeaders(origin: string | null) {
   const allowOrigin =
-    origin && ALLOWED_ORIGINS.includes(origin)
+    origin && ALLOWED_ORIGINS.has(origin)
       ? origin
-      : ALLOWED_ORIGINS[0]
+      : "https://sensihi.com"
 
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400",
-    "Vary": "Origin"
+    "Vary": "Origin",
   }
 }
 
 /* ----------------------------------
-   Very light in-memory rate limiting
-   (per session, Edge-safe)
+   In-memory rate limiting
+   (best-effort, per session)
 ---------------------------------- */
 const RATE_WINDOW_MS = 60_000
 const MAX_REQUESTS = 20
@@ -38,6 +42,7 @@ function isRateLimited(sessionId: string) {
   const timestamps = rateLimitStore.get(sessionId) || []
 
   const recent = timestamps.filter(t => now - t < RATE_WINDOW_MS)
+
   if (recent.length >= MAX_REQUESTS) {
     rateLimitStore.set(sessionId, recent)
     return true
@@ -49,27 +54,24 @@ function isRateLimited(sessionId: string) {
 }
 
 /* ----------------------------------
-   Request handler
+   OPTIONS (CORS preflight)
 ---------------------------------- */
-export default async function handler(req: Request) {
+export async function OPTIONS(req: Request) {
   const origin = req.headers.get("origin")
-  const headers = corsHeaders(origin)
+  const headers = buildCorsHeaders(origin)
 
-  /* -------- Preflight -------- */
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 200,
-      headers
-    })
-  }
+  return new Response(null, {
+    status: 204,
+    headers,
+  })
+}
 
-  /* -------- Method guard -------- */
-  if (req.method !== "POST") {
-    return new Response("Method Not Allowed", {
-      status: 405,
-      headers
-    })
-  }
+/* ----------------------------------
+   POST (main Copilot handler)
+---------------------------------- */
+export async function POST(req: Request) {
+  const origin = req.headers.get("origin")
+  const corsHeaders = buildCorsHeaders(origin)
 
   /* -------- Parse JSON -------- */
   let payload: any
@@ -78,7 +80,13 @@ export default async function handler(req: Request) {
   } catch {
     return new Response(
       JSON.stringify({ error: "Invalid JSON body" }),
-      { status: 400, headers }
+      {
+        status: 400,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
     )
   }
 
@@ -91,7 +99,13 @@ export default async function handler(req: Request) {
   ) {
     return new Response(
       JSON.stringify({ error: "Invalid request payload" }),
-      { status: 400, headers }
+      {
+        status: 400,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
     )
   }
 
@@ -100,9 +114,15 @@ export default async function handler(req: Request) {
     return new Response(
       JSON.stringify({
         message:
-          "You're sending messages too quickly. Please wait a moment and try again."
+          "You're sending messages too quickly. Please wait a moment and try again.",
       }),
-      { status: 429, headers }
+      {
+        status: 429,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
     )
   }
 
@@ -110,9 +130,16 @@ export default async function handler(req: Request) {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
     console.error("OPENAI_API_KEY is missing")
+
     return new Response(
       JSON.stringify({ message: "Server configuration error" }),
-      { status: 500, headers }
+      {
+        status: 500,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
     )
   }
 
@@ -125,15 +152,15 @@ export default async function handler(req: Request) {
       page,
       persona,
       sessionId,
-      aiClient: openai
+      aiClient: openai,
     })
 
     return new Response(JSON.stringify(result), {
       status: 200,
       headers: {
-        ...headers,
-        "Content-Type": "application/json"
-      }
+        ...corsHeaders,
+        "Content-Type": "application/json",
+      },
     })
   } catch (err) {
     console.error("COPILOT_RUNTIME_ERROR", err)
@@ -141,14 +168,14 @@ export default async function handler(req: Request) {
     return new Response(
       JSON.stringify({
         message:
-          "Copilot is temporarily unavailable. Please try again shortly."
+          "Copilot is temporarily unavailable. Please try again shortly.",
       }),
       {
         status: 500,
         headers: {
-          ...headers,
-          "Content-Type": "application/json"
-        }
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
       }
     )
   }
