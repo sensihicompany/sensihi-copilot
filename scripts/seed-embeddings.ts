@@ -1,11 +1,11 @@
 /**
  * Seed sensihi_documents with content + embeddings.
- * Usage: npm run seed [path/to/content.json]
- * Default: scripts/seed-content.json (create from seed-content.example.json)
  *
- * JSON format — use one or both:
- *   "chunks": [ { "content": "text", "metadata": { "url": "...", "title": "..." } } ]
- *   "urls": [ "https://sensihi.com/page" ]  → fetched, text extracted, chunked, then embedded
+ * Usage:
+ *   node scripts/seed-embeddings.ts [path/to/content.json]
+ *
+ * Safe for one-time / occasional runs.
+ * NOT used at runtime.
  */
 
 import "dotenv/config"
@@ -14,32 +14,43 @@ import { resolve } from "path"
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY
-const SUPABASE_URL = process.env.SUPABASE_URL
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY
+/* ----------------------------------
+   Env validation
+---------------------------------- */
+const {
+  OPENAI_API_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY
+} = process.env
 
 if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error("Missing env: OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY")
-  console.error("Copy .env.example to .env and set real values (never commit .env).")
-  process.exit(1)
-}
-if (OPENAI_API_KEY.includes("xxxx") || OPENAI_API_KEY === "sk-xxxx") {
-  console.error("OPENAI_API_KEY looks like a placeholder. Put your real OpenAI API key in .env")
-  console.error("Get a key at https://platform.openai.com/api-keys")
+  console.error("Missing env vars. Check .env")
   process.exit(1)
 }
 
+if (OPENAI_API_KEY.startsWith("sk-xxxx")) {
+  console.error("OPENAI_API_KEY looks like a placeholder")
+  process.exit(1)
+}
+
+/* ----------------------------------
+   Clients (Node runtime)
+---------------------------------- */
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY })
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+/* ----------------------------------
+   Config (tunable)
+---------------------------------- */
 const EMBEDDING_MODEL = "text-embedding-3-small"
 const CHUNK_MAX_CHARS = 800
 const CHUNK_OVERLAP = 100
+const MAX_CONCURRENCY = 3 // protects quota
+const DRY_RUN = false     // set true to test without inserts
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
+/* ----------------------------------
+   Types
+---------------------------------- */
 interface Chunk {
   content: string
   metadata?: Record<string, unknown>
@@ -50,14 +61,13 @@ interface SeedInput {
   urls?: string[]
 }
 
-// ---------------------------------------------------------------------------
-// Fetch URL and extract plain text (strip HTML, basic)
-// ---------------------------------------------------------------------------
-
+/* ----------------------------------
+   Helpers
+---------------------------------- */
 function stripHtml(html: string): string {
   return html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -67,113 +77,113 @@ async function fetchTextFromUrl(url: string): Promise<string> {
   const res = await fetch(url, {
     headers: { "User-Agent": "SensihiCopilot-Seed/1.0" }
   })
-  if (!res.ok) throw new Error(`Fetch ${url}: ${res.status}`)
-  const html = await res.text()
-  return stripHtml(html)
+  if (!res.ok) throw new Error(`Fetch failed: ${url} (${res.status})`)
+  return stripHtml(await res.text())
 }
 
-function splitIntoChunks(text: string, baseMetadata?: Record<string, unknown>): Chunk[] {
+function splitIntoChunks(text: string, metadata?: Record<string, unknown>): Chunk[] {
   const chunks: Chunk[] = []
-  const paragraphs = text.split(/\n\n+/).map(p => p.trim()).filter(Boolean)
   let current = ""
 
-  for (const p of paragraphs) {
-    if (current.length + p.length + 2 <= CHUNK_MAX_CHARS) {
+  for (const para of text.split(/\n\n+/)) {
+    const p = para.trim()
+    if (!p) continue
+
+    if (current.length + p.length <= CHUNK_MAX_CHARS) {
       current += (current ? "\n\n" : "") + p
     } else {
-      if (current) {
-        chunks.push({ content: current, metadata: baseMetadata })
-        const start = Math.max(0, current.length - CHUNK_OVERLAP)
-        current = current.slice(start) + "\n\n" + p
-      } else {
-        // Single paragraph longer than max
-        for (let i = 0; i < p.length; i += CHUNK_MAX_CHARS - CHUNK_OVERLAP) {
-          chunks.push({
-            content: p.slice(i, i + CHUNK_MAX_CHARS),
-            metadata: baseMetadata
-          })
-        }
-        current = ""
-      }
+      chunks.push({ content: current, metadata })
+      current = current.slice(-CHUNK_OVERLAP) + "\n\n" + p
     }
   }
-  if (current) chunks.push({ content: current, metadata: baseMetadata })
+
+  if (current) chunks.push({ content: current, metadata })
   return chunks
 }
 
-// ---------------------------------------------------------------------------
-// Embed and insert
-// ---------------------------------------------------------------------------
-
-async function getEmbedding(text: string): Promise<number[]> {
-  const { data } = await openai.embeddings.create({
+/* ----------------------------------
+   Embedding (quota-safe)
+---------------------------------- */
+async function embed(text: string): Promise<number[]> {
+  const res = await openai.embeddings.create({
     model: EMBEDDING_MODEL,
-    input: text.replace(/\n/g, " ").slice(0, 8000)
+    input: text.slice(0, 8000)
   })
-  return data[0].embedding
+  return res.data[0].embedding
 }
 
+/* ----------------------------------
+   Main
+---------------------------------- */
 async function main() {
   const jsonPath = resolve(process.cwd(), process.argv[2] || "scripts/seed-content.json")
-  let input: SeedInput
+  const input = JSON.parse(readFileSync(jsonPath, "utf-8")) as SeedInput
 
-  try {
-    const raw = readFileSync(jsonPath, "utf-8")
-    input = JSON.parse(raw) as SeedInput
-  } catch (e) {
-    console.error("Failed to read JSON at", jsonPath)
-    console.error("Copy scripts/seed-content.example.json to scripts/seed-content.json and fill it.")
-    process.exit(1)
-  }
-
-  const allChunks: Chunk[] = [...(input.chunks || [])]
+  const chunks: Chunk[] = [...(input.chunks || [])]
 
   if (input.urls?.length) {
-    console.log("Fetching", input.urls.length, "URL(s)...")
     for (const url of input.urls) {
       try {
         const text = await fetchTextFromUrl(url)
-        const urlChunks = splitIntoChunks(text, { url })
-        allChunks.push(...urlChunks)
-        console.log("  ", url, "→", urlChunks.length, "chunk(s)")
+        chunks.push(...splitIntoChunks(text, { url }))
+        console.log("Fetched:", url)
       } catch (err) {
-        console.warn("  Skip", url, err)
+        console.warn("Skip URL:", url, err)
       }
     }
   }
 
-  if (allChunks.length === 0) {
-    console.error("No chunks to seed. Add 'chunks' and/or 'urls' in your JSON.")
-    process.exit(1)
+  if (!chunks.length) {
+    console.error("No content to seed.")
+    return
   }
 
-  console.log("Embedding", allChunks.length, "chunk(s)...")
+  console.log(`Seeding ${chunks.length} chunk(s)...`)
+  console.log(`Estimated embedding calls: ${chunks.length}`)
+  if (DRY_RUN) {
+    console.log("DRY RUN — no inserts will be made")
+    return
+  }
 
   let inserted = 0
-  for (let i = 0; i < allChunks.length; i++) {
-    const chunk = allChunks[i]
-    const content = chunk.content.trim()
-    if (!content) continue
 
-    const embedding = await getEmbedding(content)
-    const { error } = await supabase.from("sensihi_documents").insert({
-      content,
-      embedding,
-      metadata: chunk.metadata ?? null
-    })
+  for (let i = 0; i < chunks.length; i += MAX_CONCURRENCY) {
+    const batch = chunks.slice(i, i + MAX_CONCURRENCY)
 
-    if (error) {
-      console.error("Insert error:", error.message)
-      continue
-    }
-    inserted++
-    if ((i + 1) % 10 === 0) console.log("  ", i + 1, "/", allChunks.length)
+    await Promise.all(
+      batch.map(async (chunk) => {
+        const content = chunk.content.trim()
+        if (!content) return
+
+        // Idempotency: skip if content already exists
+        const { count } = await supabase
+          .from("sensihi_documents")
+          .select("*", { count: "exact", head: true })
+          .eq("content", content)
+
+        if (count && count > 0) return
+
+        try {
+          const embedding = await embed(content)
+          const { error } = await supabase.from("sensihi_documents").insert({
+            content,
+            embedding,
+            metadata: chunk.metadata ?? null
+          })
+          if (!error) inserted++
+        } catch (err) {
+          console.error("Failed chunk:", err)
+        }
+      })
+    )
+
+    console.log(`Progress: ${Math.min(i + MAX_CONCURRENCY, chunks.length)}/${chunks.length}`)
   }
 
-  console.log("Done. Inserted", inserted, "row(s) into sensihi_documents.")
+  console.log("Done. Inserted", inserted, "new row(s).")
 }
 
 main().catch(err => {
-  console.error(err)
+  console.error("Fatal:", err)
   process.exit(1)
 })
