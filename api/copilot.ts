@@ -1,20 +1,6 @@
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
 
-/**
- * ⚠️ FORMAT CONTRACT — DO NOT BREAK
- *
- * The assistant MUST:
- * - Use a clear heading at the top
- * - Follow with a short summary (1–2 lines)
- * - Use bullet points with bold labels
- * - Avoid long paragraphs
- * - NEVER include inline citations like (Source 1)
- *
- * References are returned separately and shown as CTA pills.
- * Frontend rendering depends on this structure.
- */
-
 /* ----------------------------------
    CORS CONFIG (LOCKED)
 ---------------------------------- */
@@ -50,16 +36,15 @@ const supabase = createClient(
 )
 
 /* ----------------------------------
-   Helpers
+   Helpers (SAFE)
 ---------------------------------- */
 
-/** Allow only real, useful content pages */
 function isValidReference(meta?: any) {
   if (!meta?.url || !meta?.title) return false
 
   const url = meta.url.toLowerCase()
 
-  // Block generic or navigational pages
+  // Remove navigation / generic pages
   if (
     url === "https://sensihi.com" ||
     url.endsWith("/") ||
@@ -70,19 +55,11 @@ function isValidReference(meta?: any) {
     return false
   }
 
-  // Allow only real content
   return (
     url.includes("/insights/") ||
     url.includes("/blog") ||
     url.includes("/case")
   )
-}
-
-/** Boost /insights content slightly */
-function relevanceScore(match) {
-  const url = match.metadata?.url || ""
-  const boost = url.includes("/insights/") ? 0.1 : 0
-  return match.similarity + boost
 }
 
 /* ----------------------------------
@@ -93,7 +70,6 @@ export default async function handler(req, res) {
   const origin = req.headers.origin
   setCors(res, origin)
 
-  /* ---- Preflight ---- */
   if (req.method === "OPTIONS") {
     return res.status(200).end()
   }
@@ -110,7 +86,7 @@ export default async function handler(req, res) {
     }
 
     /* ----------------------------------
-       1. Embed the query
+       1. Embed query
     ---------------------------------- */
     const embeddingRes = await openai.embeddings.create({
       model: "text-embedding-3-small",
@@ -120,14 +96,14 @@ export default async function handler(req, res) {
     const queryEmbedding = embeddingRes.data[0].embedding
 
     /* ----------------------------------
-       2. Vector search (TIGHTENED)
+       2. Vector search (RELAXED, SAFE)
     ---------------------------------- */
     const { data: matches, error } = await supabase.rpc(
       "match_sensihi_documents",
       {
         query_embedding: queryEmbedding,
-        match_threshold: 0.25, // ⬅️ tightened safely
-        match_count: 8,
+        match_threshold: 0.15, // 🔒 reverted to working value
+        match_count: 6,
       }
     )
 
@@ -140,8 +116,7 @@ export default async function handler(req, res) {
       return res.json({
         ok: true,
         message:
-          "### I don’t have a strong answer for that yet\n\nI don’t have enough Sensihi-specific context to answer confidently. You can explore our insights or ask about our services, AI strategy, or prototyping work.",
-        intent: "exploring",
+          "I don’t have relevant Sensihi information for that yet. Try asking about our AI solutions, insights, or how we work with teams.",
         references: [],
         cta: [
           { label: "Explore Insights", url: "/insights", type: "primary" },
@@ -151,35 +126,18 @@ export default async function handler(req, res) {
     }
 
     /* ----------------------------------
-       3. Rank + filter documents
+       3. Build grounded context (NO FILTER DROP)
     ---------------------------------- */
-    const ranked = matches
-      .map((m) => ({ ...m, score: relevanceScore(m) }))
-      .sort((a, b) => b.score - a.score)
-      .filter((m) => m.similarity >= 0.78) // ⬅️ confidence gate
-
-    if (ranked.length === 0) {
-      return res.json({
-        ok: true,
-        message:
-          "### Not enough reliable context\n\nI couldn’t find strong enough Sensihi material to answer this accurately. Would you like to explore a related topic or our recent insights?",
-        references: [],
-      })
-    }
-
-    /* ----------------------------------
-       4. Build clean context (NO citations)
-    ---------------------------------- */
-    const context = ranked
+    const context = matches
       .slice(0, 4)
       .map(
         (m) =>
-          `Title: ${m.metadata?.title}\nContent: ${m.content}`
+          `Title: ${m.metadata?.title}\n${m.content}`
       )
       .join("\n\n")
 
     /* ----------------------------------
-       5. Generate formatted answer
+       4. Generate answer (PLAIN TEXT)
     ---------------------------------- */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -189,27 +147,27 @@ export default async function handler(req, res) {
           content: `
 You are Sensihi Copilot.
 
-Follow these rules strictly:
-- Start with a clear heading
-- Add a short summary (1–2 sentences)
-- Use bullet points with **bold labels**
+Rules:
+- Start with a clear heading (no markdown symbols)
+- Follow with a short summary
+- Use bullet points with clear labels
 - Add spacing between sections
-- Avoid long paragraphs
+- Be concise and confident
 - Do NOT include citations or source numbers
-- Be concise, confident, and practical
+- Answer ONLY using the provided context
           `.trim(),
         },
         {
           role: "user",
-          content: `Question:\n${message}\n\nContext:\n${context}`,
+          content: `Question: ${message}\n\nContext:\n${context}`,
         },
       ],
     })
 
     /* ----------------------------------
-       6. Build CTA references (MAX 3)
+       5. CTA references (MAX 3, REAL ONLY)
     ---------------------------------- */
-    const references = ranked
+    const references = matches
       .filter((m) => isValidReference(m.metadata))
       .slice(0, 3)
       .map((m) => ({
