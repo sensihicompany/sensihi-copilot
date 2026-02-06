@@ -1,6 +1,15 @@
 import { vectorSearch } from "./vector.js"
-import { getSessionMemory, updateSessionMemory } from "./memory.js"
-import { detectUserIntent, recommendNextAction } from "./tools.js"
+import {
+  getSessionMemory,
+  updateSessionMemory,
+  getLastContext,
+  setLastContext,
+} from "./memory.js"
+import {
+  detectUserIntent,
+  recommendNextActions,
+  summarizeForPersona,
+} from "./tools.js"
 import { scoreLead } from "./leadScore.js"
 import { trackEvent } from "./analytics.js"
 
@@ -28,6 +37,7 @@ type Reference = {
 ---------------------------------- */
 
 const SITE_ORIGIN = "https://sensihi.com"
+const MAX_REFERENCES = 5
 
 /* ----------------------------------
    Helpers
@@ -55,9 +65,7 @@ function extractReferences(
 
   for (const d of docs) {
     const meta = d.metadata || {}
-    const rawUrl = meta.url || meta.href
-    const url = normalizeUrl(rawUrl)
-
+    const url = normalizeUrl(meta.url || meta.href)
     if (!url || seen.has(url)) continue
 
     seen.add(url)
@@ -70,12 +78,10 @@ function extractReferences(
     })
   }
 
-  return refs.slice(0, 5)
+  return refs.slice(0, MAX_REFERENCES)
 }
 
 function formatAnswer(text: string): string {
-  if (!text) return ""
-
   return text
     .replace(/\n{3,}/g, "\n\n")
     .replace(/•\s?/g, "• ")
@@ -105,6 +111,7 @@ export async function runCopilotV2({
 
   const { intent } = detectUserIntent(message)
   const memory = getSessionMemory(sessionId)
+  const previousContext = getLastContext(sessionId)
 
   /* ------------------------------
      2. Vector search
@@ -114,20 +121,21 @@ export async function runCopilotV2({
 
   try {
     docs = await vectorSearch(message)
-  } catch (err) {
-    console.error("VECTOR_SEARCH_FAILED", err)
+  } catch {
+    // Vector failures should never block Copilot
+    docs = []
   }
 
   /* ------------------------------
-     3. Context + references
+     3. Context resolution
+     (new results OR memory fallback)
   ------------------------------ */
 
-  const context = docs
-    .map((d) => d.content)
-    .filter(Boolean)
-    .join("\n\n")
-
-  const references = extractReferences(docs)
+  const context =
+    docs
+      .map((d) => d.content)
+      .filter(Boolean)
+      .join("\n\n") || previousContext || ""
 
   if (!context) {
     updateSessionMemory(sessionId, message)
@@ -137,9 +145,16 @@ export async function runCopilotV2({
         "I don’t have relevant Sensihi information for that yet. Try asking about our solutions, insights, or working with Sensihi.",
       intent,
       references: [],
-      cta: recommendNextAction(intent),
+      lead: scoreLead({
+        intent,
+        messageCount: memory.length + 1,
+        askedForDemo: message.toLowerCase().includes("demo"),
+      }),
+      cta: recommendNextActions(intent),
     }
   }
+
+  setLastContext(sessionId, context)
 
   /* ------------------------------
      4. LLM completion
@@ -158,10 +173,10 @@ You are Sensihi Copilot.
 
 Rules:
 - Answer ONLY using the provided information.
-- Do NOT invent facts or external knowledge.
-- Write clearly, with paragraphs.
-- Explain things in a practical business context.
-- Do NOT mention internal mechanics.
+- Do NOT invent facts.
+- Write clearly with short paragraphs.
+- Use practical, business-friendly language.
+- Do NOT mention internal sources or system behavior.
 `,
         },
         ...memory.map((m) => ({
@@ -170,72 +185,60 @@ Rules:
         })),
         {
           role: "user",
-          content: `Question:\n${message}\n\nInformation:\n${context}`,
+          content: context
+            ? `Information:\n${context}\n\nQuestion:\n${message}`
+            : message,
         },
       ],
     })
 
     answer =
       completion.choices?.[0]?.message?.content ?? ""
-  } catch (err) {
-    console.error("OPENAI_FAILED", err)
-
-    updateSessionMemory(sessionId, message)
-
+  } catch {
     return {
       message:
-        "I’m temporarily unavailable. Please try again in a moment.",
+        "I’m temporarily unavailable. Please try again shortly.",
       intent,
       references: [],
-      cta: recommendNextAction(intent),
+      cta: recommendNextActions(intent),
     }
   }
 
-  answer = formatAnswer(answer)
+  answer = summarizeForPersona(
+    formatAnswer(answer),
+    persona || ""
+  )
 
   /* ------------------------------
-     5. Memory update
+     5. Memory + analytics
   ------------------------------ */
 
   updateSessionMemory(sessionId, message)
 
-  /* ------------------------------
-     6. Lead scoring + analytics
-  ------------------------------ */
+  const lead = scoreLead({
+    intent,
+    messageCount: memory.length + 1,
+    askedForDemo: message.toLowerCase().includes("demo"),
+  })
 
-  let lead = { score: 0, tier: "cold" }
-
-  try {
-    lead = scoreLead({
-      intent,
-      messageCount: memory.length + 1,
-      askedForDemo: message.toLowerCase().includes("demo"),
-    })
-  } catch (err) {
-    console.error("LEAD_SCORE_FAILED", err)
-  }
-
-  try {
-    trackEvent({
-      sessionId,
-      intent,
-      page,
-      leadTier: lead.tier,
-      references: references.length,
-    })
-  } catch (err) {
-    console.error("ANALYTICS_FAILED", err)
-  }
+  trackEvent({
+    type: "copilot_response",
+    sessionId,
+    intent,
+    page,
+    leadTier: lead.tier,
+    references: docs.length,
+  })
 
   /* ------------------------------
-     7. Final response
+     6. Final response
   ------------------------------ */
 
   return {
     message: answer,
     intent,
-    references,
+    references: extractReferences(docs),
     lead,
-    cta: recommendNextAction(intent),
+    cta: recommendNextActions(intent),
   }
 }
