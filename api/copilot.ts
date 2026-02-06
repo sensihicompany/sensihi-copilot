@@ -5,8 +5,13 @@ export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
-  res.status(200).json({
-    ok: true,
-    orchestratorType: typeof runCopilotV2,
-  })
+  try {
+    const result = await runCopilotV2()
+    res.status(200).json(result)
+  } catch (err: any) {
+    res.status(500).json({
+      ok: false,
+      error: err?.message ?? String(err),
+    })
+  }
 }
