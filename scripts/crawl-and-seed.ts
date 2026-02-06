@@ -1,7 +1,10 @@
 /**
- * Sensihi Copilot — Crawl & Seed (PRODUCTION)
- * Crawls sensihi.com, extracts meaningful content,
- * chunks it, embeds it, and stores reference-grade metadata.
+ * Sensihi Copilot — Crawl & Seed
+ *
+ * Crawls sensihi.com (including /insights),
+ * extracts meaningful content, chunks it,
+ * embeds it, and upserts into Supabase
+ * with reference-grade metadata.
  *
  * ⚠️ ADMIN SCRIPT — NEVER RUN IN PROD RUNTIME
  */
@@ -18,7 +21,7 @@ import { JSDOM } from "jsdom"
 const {
   OPENAI_API_KEY,
   SUPABASE_URL,
-  SUPABASE_SERVICE_KEY
+  SUPABASE_SERVICE_KEY,
 } = process.env
 
 if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
@@ -31,11 +34,11 @@ if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 ---------------------------------- */
 
 const BASE_URL = "https://sensihi.com"
-const MAX_PAGES = 60
+const MAX_PAGES = 80                 // increased for /insights
 const MIN_TEXT_LENGTH = 250
 
-const CHUNK_SIZE = 800
-const CHUNK_OVERLAP = 120
+const CHUNK_SIZE = 900
+const CHUNK_OVERLAP = 150
 
 const EMBEDDING_MODEL = "text-embedding-3-small"
 
@@ -72,58 +75,65 @@ function inferType(url: string): "page" | "insight" | "blog" | "case-study" {
   return "page"
 }
 
+/* ----------------------------------
+   Fetch
+---------------------------------- */
+
 async function fetchHtml(url: string): Promise<string> {
   const res = await fetch(url, {
-    headers: { "User-Agent": "SensihiCrawler/1.0" }
+    headers: { "User-Agent": "SensihiCopilotCrawler/1.0" }
   })
 
   if (!res.ok) {
-    throw new Error(`Fetch failed ${res.status}`)
+    throw new Error(`Failed ${url} (${res.status})`)
   }
 
   return res.text()
 }
 
 /* ----------------------------------
-   Link extraction (Framer-safe)
+   ✅ LINK EXTRACTION (Framer-safe)
 ---------------------------------- */
 
 function extractLinks(html: string, currentUrl: string): string[] {
   const dom = new JSDOM(html, { url: currentUrl })
   const anchors = Array.from(dom.window.document.querySelectorAll("a"))
 
-  const links = anchors
-    .map(a => a.getAttribute("href"))
-    .filter(Boolean)
-    .map(href => {
-      try {
-        return normalizeUrl(new URL(href!, currentUrl).toString())
-      } catch {
-        return null
-      }
-    })
-    .filter(
-      (url): url is string =>
-        !!url &&
-        isInternal(url) &&
-        !url.includes("#") &&
-        !url.includes("?") &&
-        !url.endsWith(".pdf")
+  return Array.from(
+    new Set(
+      anchors
+        .map(a => a.getAttribute("href"))
+        .filter(Boolean)
+        .map(href => {
+          try {
+            return normalizeUrl(new URL(href!, currentUrl).toString())
+          } catch {
+            return null
+          }
+        })
+        .filter(
+          (url): url is string =>
+            !!url &&
+            isInternal(url) &&
+            !url.includes("#") &&
+            !url.includes("?") &&
+            !url.endsWith(".pdf")
+        )
     )
-
-  return Array.from(new Set(links))
+  )
 }
 
 /* ----------------------------------
-   Content extraction
+   CONTENT EXTRACTION (HIGH SIGNAL)
 ---------------------------------- */
 
 function extractContent(html: string) {
   const dom = new JSDOM(html)
   const doc = dom.window.document
 
+  // Remove noise
   doc
-    .querySelectorAll("script,style,nav,footer,header")
+    .querySelectorAll("script,style,nav,footer,header,aside")
     .forEach(el => el.remove())
 
   const title =
@@ -132,8 +142,8 @@ function extractContent(html: string) {
     doc.querySelector("h1")?.textContent ||
     "Sensihi"
 
-  const paragraphs = Array.from(
-    doc.querySelectorAll("main p, article p")
+  const text = Array.from(
+    doc.querySelectorAll("main p, article p, section p")
   )
     .map(p => p.textContent || "")
     .join("\n\n")
@@ -142,7 +152,7 @@ function extractContent(html: string) {
 
   return {
     title: title.trim(),
-    text: paragraphs
+    text,
   }
 }
 
@@ -152,11 +162,11 @@ function extractContent(html: string) {
 
 function chunkText(text: string): string[] {
   const chunks: string[] = []
-  let i = 0
+  let cursor = 0
 
-  while (i < text.length) {
-    chunks.push(text.slice(i, i + CHUNK_SIZE))
-    i += CHUNK_SIZE - CHUNK_OVERLAP
+  while (cursor < text.length) {
+    chunks.push(text.slice(cursor, cursor + CHUNK_SIZE))
+    cursor += CHUNK_SIZE - CHUNK_OVERLAP
   }
 
   return chunks
@@ -169,7 +179,7 @@ function chunkText(text: string): string[] {
 async function embed(text: string): Promise<number[]> {
   const res = await openai.embeddings.create({
     model: EMBEDDING_MODEL,
-    input: text.slice(0, 8000)
+    input: text.slice(0, 8000),
   })
   return res.data[0].embedding
 }
@@ -228,16 +238,16 @@ async function main() {
       try {
         const embedding = await embed(content)
 
-        await supabase.from("sensihi_documents").insert({
+        await supabase.from("sensihi_documents").upsert({
           content,
           embedding,
           metadata: {
             url,
             title,
-            type
-          }
+            type,
+          },
         })
-      } catch (err) {
+      } catch {
         console.error("❌ Embed failed:", url)
       }
     }
@@ -247,6 +257,6 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error("Fatal error:", err)
+  console.error("💥 Fatal error:", err)
   process.exit(1)
 })
