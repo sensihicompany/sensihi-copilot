@@ -1,18 +1,8 @@
 import { vectorSearch } from "./vector"
-import {
-  getSessionMemory,
-  updateSessionMemory,
-  getLastContext,
-  setLastContext
-} from "./memory"
-import {
-  detectUserIntent,
-  recommendNextAction,
-  summarizeForPersona
-} from "./tools"
+import { getSessionMemory, updateSessionMemory } from "./memory"
+import { detectUserIntent, recommendNextAction } from "./tools"
 import { scoreLead } from "./leadScore"
 import { trackEvent } from "./analytics"
-import { getFallbackContent } from "./content"
 
 /* ----------------------------------
    Types
@@ -27,37 +17,59 @@ type AIClient = {
   }
 }
 
+type VectorDoc = {
+  content?: string
+  metadata?: {
+    url?: string
+    title?: string
+    type?: string
+  }
+  similarity?: number
+}
+
 /* ----------------------------------
-   Helpers
+   Extract article / insight references
 ---------------------------------- */
+function extractReferences(docs: VectorDoc[]) {
+  const seen = new Set<string>()
 
-// Static answers that require zero AI usage
-function getStaticAnswer(message: string): string | null {
-  const m = message.toLowerCase()
-
-  if (m.includes("what does sensihi do")) {
-    return (
-      "Sensihi provides AI-driven solutions that help modern businesses " +
-      "improve decision-making, automate workflows, and scale intelligence across teams."
+  return docs
+    .map(d => d.metadata)
+    .filter(
+      m =>
+        m?.url &&
+        m?.title &&
+        !seen.has(m.url) &&
+        seen.add(m.url)
     )
-  }
-
-  if (m.includes("contact") || m.includes("reach you")) {
-    return "You can reach the Sensihi team via the contact page to start a conversation."
-  }
-
-  return null
-}
-
-// Decide when vector search is worth running
-function shouldRunVectorSearch(message: string, memoryLength: number) {
-  if (message.length < 15) return false        // low signal
-  if (memoryLength > 0) return false           // follow-up
-  return true
+    .slice(0, 4)
+    .map(m => ({
+      title: m!.title!,
+      url: m!.url!
+    }))
 }
 
 /* ----------------------------------
-   Orchestrator
+   Build LLM context
+---------------------------------- */
+function buildContext(docs: VectorDoc[]) {
+  const chunks = docs
+    .map(d => d.content)
+    .filter(Boolean)
+
+  if (chunks.length === 0) {
+    return `
+Sensihi helps organizations apply AI responsibly and effectively
+to real business workflows, improving decision-making, automating
+processes, and scaling intelligence across teams.
+`
+  }
+
+  return chunks.join("\n\n")
+}
+
+/* ----------------------------------
+   Main Copilot Orchestrator
 ---------------------------------- */
 export async function runCopilotV2({
   message,
@@ -72,78 +84,25 @@ export async function runCopilotV2({
   sessionId: string
   aiClient: AIClient
 }) {
-  /* ------------------------------
-     1. Intent + session memory
-  ------------------------------ */
+  /* -------- 1. Intent + memory -------- */
   const { intent } = detectUserIntent(message)
   const memory = getSessionMemory(sessionId)
 
-  /* ------------------------------
-     2. Static short-circuit
-     (0 OpenAI calls)
-  ------------------------------ */
-  const staticAnswer = getStaticAnswer(message)
-  if (staticAnswer) {
-    updateSessionMemory(sessionId, message)
+  /* -------- 2. Vector search -------- */
+  let docs: VectorDoc[] = []
 
-    const lead = scoreLead({
-      intent,
-      messageCount: memory.length + 1,
-      askedForDemo: false
-    })
-
-    trackEvent({ sessionId, intent, page, leadTier: lead.tier })
-
-    return {
-      message: persona
-        ? summarizeForPersona(staticAnswer, persona)
-        : staticAnswer,
-      intent,
-      lead,
-      cta: recommendNextAction(intent)
-    }
+  try {
+    docs = await vectorSearch(message)
+  } catch (err) {
+    console.error("VECTOR_SEARCH_FAILED", err)
+    docs = []
   }
 
-  /* ------------------------------
-     3. Resolve context
-     (reuse → vector → static)
-  ------------------------------ */
-  let context = getLastContext(sessionId) || ""
+  /* -------- 3. Context + references -------- */
+  const context = buildContext(docs)
+  const references = extractReferences(docs)
 
-  // Only run vector search if we don’t already have context
-  if (!context && shouldRunVectorSearch(message, memory.length)) {
-    try {
-      const docs = await vectorSearch(message)
-
-      if (docs.length > 0) {
-        context = docs
-          .map(d => d.content)
-          .filter(Boolean)
-          .join("\n")
-
-        setLastContext(sessionId, context)
-      }
-    } catch (err) {
-      console.error("VECTOR_SEARCH_FAILED", err)
-    }
-  }
-
-  // Final fallback: static content
-  if (!context) {
-    const fallback = await getFallbackContent(message)
-    context = fallback.join("\n")
-  }
-
-  // Absolute last resort
-  if (!context) {
-    context =
-      "Sensihi provides AI-driven solutions that help modern businesses " +
-      "improve decision-making, automate workflows, and scale intelligence across teams."
-  }
-
-  /* ------------------------------
-     4. OpenAI completion (SAFE)
-  ------------------------------ */
+  /* -------- 4. OpenAI completion -------- */
   let answer = ""
 
   try {
@@ -152,8 +111,27 @@ export async function runCopilotV2({
       messages: [
         {
           role: "system",
-          content:
-            "You are Sensihi’s website copilot. Answer clearly and only using the provided context. Do not invent details."
+          content: `
+You are Sensihi’s website copilot.
+
+Your role:
+- Help visitors understand Sensihi’s offerings, insights, and expertise.
+- Use Sensihi articles, blogs, and case studies as grounding when available.
+
+Rules:
+- If a question is general (e.g., “What is prototyping?”), explain it briefly in plain language.
+- Then relate the concept back to how Sensihi applies or thinks about it.
+- NEVER say “not in the provided context” or similar phrases.
+- Do not invent facts about Sensihi.
+- Prefer practical, business-focused explanations over theory.
+- Keep answers concise but helpful.
+
+Tone:
+- Clear
+- Confident
+- Professional
+- Not academic
+`
         },
         ...memory.map(m => ({
           role: "user" as const,
@@ -166,7 +144,9 @@ export async function runCopilotV2({
       ]
     })
 
-    answer = completion.choices?.[0]?.message?.content ?? ""
+    answer =
+      completion.choices?.[0]?.message?.content ??
+      "How can I help you with Sensihi?"
   } catch (err: any) {
     console.error("OPENAI_COMPLETION_FAILED", err?.code || err?.message)
 
@@ -175,52 +155,49 @@ export async function runCopilotV2({
         "I’m temporarily at capacity right now. Please try again in a moment.",
       intent,
       confidence: "low",
-      cta: recommendNextAction(intent)
+      cta: recommendNextAction(intent),
+      references
     }
   }
 
-  /* ------------------------------
-     5. Persona adaptation
-  ------------------------------ */
-  if (persona && answer) {
-    try {
-      answer = summarizeForPersona(answer, persona)
-    } catch (err) {
-      console.error("PERSONA_SUMMARY_FAILED", err)
-    }
+  /* -------- 5. Update session memory -------- */
+  try {
+    updateSessionMemory(sessionId, message)
+  } catch (err) {
+    console.error("SESSION_MEMORY_UPDATE_FAILED", err)
   }
 
-  /* ------------------------------
-     6. Update session memory
-  ------------------------------ */
-  updateSessionMemory(sessionId, message)
+  /* -------- 6. Lead scoring -------- */
+  let lead
 
-  /* ------------------------------
-     7. Lead scoring
-  ------------------------------ */
-  const lead = scoreLead({
-    intent,
-    messageCount: memory.length + 1,
-    askedForDemo: message.toLowerCase().includes("demo")
-  })
+  try {
+    lead = scoreLead({
+      intent,
+      messageCount: memory.length + 1,
+      askedForDemo: message.toLowerCase().includes("demo")
+    })
+  } catch {
+    lead = { score: 0, tier: "cold" }
+  }
 
-  /* ------------------------------
-     8. Analytics (fire-and-forget)
-  ------------------------------ */
-  trackEvent({
-    sessionId,
-    intent,
-    page,
-    leadTier: lead.tier
-  })
+  /* -------- 7. Analytics (non-blocking) -------- */
+  try {
+    await trackEvent({
+      sessionId,
+      intent,
+      page,
+      leadTier: lead.tier
+    })
+  } catch {
+    /* ignore */
+  }
 
-  /* ------------------------------
-     9. Final response
-  ------------------------------ */
+  /* -------- 8. Final response -------- */
   return {
-    message: answer || "How can I help you with Sensihi?",
+    message: answer,
     intent,
     lead,
-    cta: recommendNextAction(intent)
+    cta: recommendNextAction(intent),
+    references
   }
 }

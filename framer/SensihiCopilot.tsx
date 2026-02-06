@@ -1,248 +1,360 @@
 /**
- * Sensihi Website Copilot — Framer Code Component
- * Paste into Framer → Code Component
- * Floating launcher, persona switch, CTA rendering, session ID, MCP payload
+ * Sensihi Copilot — Premium Framer Component
+ * Ask-McKinsey inspired UX
  */
 
-import React, { useState, useCallback, useRef, useEffect } from "react"
+import * as React from "react"
+import { useState, useEffect, useRef } from "react"
+import { addPropertyControls, ControlType } from "framer"
 
-const COPILOT_API = "https://sensihi-copilot.vercel.app/api/copilot"
+type Message = {
+  role: "user" | "assistant"
+  content: string
+}
+
+type CTA = { label: string; url: string }
+type Reference = { title: string; url: string }
+
+type CopilotResponse = {
+  message: string
+  cta?: CTA[]
+  references?: Reference[]
+}
+
+const SUGGESTED_QUESTIONS = [
+  "How can Sensihi help my startup?",
+  "What AI solutions does Sensihi offer?",
+  "How does Sensihi work with existing tools?",
+  "Can I talk to someone from Sensihi?",
+]
 
 function generateSessionId() {
-  return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36)
+  return `sess_${Math.random().toString(36).slice(2)}`
 }
 
-type Persona = "default" | "founder" | "sales" | "technical"
-
-interface CopilotResponse {
-  message: string
-  intent?: string
-  lead?: { score: number; tier: string }
-  cta?: { label: string; url: string }
-  confidence?: string
-}
-
-export function SensihiCopilot() {
+export function SensihiCopilot({ apiUrl }: { apiUrl: string }) {
   const [open, setOpen] = useState(false)
+  const [visible, setVisible] = useState(false)
+  const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
-  const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([])
   const [loading, setLoading] = useState(false)
-  const [persona, setPersona] = useState<Persona>("default")
-  const [cta, setCta] = useState<{ label: string; url: string } | null>(null)
-  const sessionIdRef = useRef<string>(generateSessionId())
+  const [ctas, setCtas] = useState<CTA[]>([])
+  const [refs, setRefs] = useState<Reference[]>([])
+
+  const sessionId = useRef(generateSessionId())
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  const isPhone =
+    typeof window !== "undefined" && window.innerWidth < 480
+
+  const dark =
+    typeof window !== "undefined" &&
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+
+  const bg = dark ? "#0b0b0b" : "#ffffff"
+  const fg = dark ? "#f5f5f5" : "#111"
+  const subtle = dark ? "#999" : "#666"
+  const border = dark ? "#1f1f1f" : "#eaeaea"
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages])
+  }, [messages, loading])
 
-  const sendMessage = useCallback(async () => {
-    const text = input.trim()
+  async function sendMessage(text: string) {
     if (!text || loading) return
 
+    setMessages((m) => [...m, { role: "user", content: text }])
     setInput("")
-    setMessages(prev => [...prev, { role: "user", content: text }])
     setLoading(true)
-    setCta(null)
+    setCtas([])
+    setRefs([])
 
     try {
-      const res = await fetch(COPILOT_API, {
+      const res = await fetch(apiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text,
-          page: typeof window !== "undefined" ? window.location.pathname : "/",
-          persona: persona === "default" ? undefined : persona,
-          sessionId: sessionIdRef.current
-        })
+          sessionId: sessionId.current,
+          page:
+            typeof window !== "undefined"
+              ? window.location.pathname
+              : "/",
+        }),
       })
 
-      if (!res.ok) {
-        throw new Error(res.statusText)
-      }
-
       const data: CopilotResponse = await res.json()
-      setMessages(prev => [...prev, { role: "assistant", content: data.message }])
-      if (data.cta) setCta(data.cta)
-    } catch (e) {
-      setMessages(prev => [
-        ...prev,
-        { role: "assistant", content: "Sorry, I couldn’t reach the copilot. Please try again." }
+
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: data.message },
+      ])
+      setCtas(data.cta || [])
+      setRefs(data.references || [])
+    } catch {
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          content:
+            "I couldn’t reach the copilot right now. Please try again.",
+        },
       ])
     } finally {
       setLoading(false)
     }
-  }, [input, loading, persona])
+  }
 
-  return (
-    <>
-      {/* Floating launcher */}
+  /* ---------------- Pill Launcher ---------------- */
+
+  if (!visible && !open) {
+    return (
       <button
-        type="button"
-        onClick={() => setOpen(o => !o)}
+        onClick={() => {
+          setVisible(true)
+          requestAnimationFrame(() => setOpen(true))
+        }}
         style={{
           position: "fixed",
           bottom: 24,
           right: 24,
-          width: 56,
-          height: 56,
-          borderRadius: 28,
-          border: "none",
+          padding: "12px 18px",
+          borderRadius: 999,
           background: "#111",
           color: "#fff",
-          fontSize: 24,
+          fontWeight: 600,
+          border: "none",
           cursor: "pointer",
-          boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
-          zIndex: 9998
+          zIndex: 9999,
         }}
-        aria-label="Open copilot"
       >
-        {open ? "✕" : "◆"}
+        Ask Sensihi ✦
       </button>
+    )
+  }
 
-      {open && (
-        <div
+  /* ---------------- Panel ---------------- */
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        right: isPhone ? 0 : 24,
+        bottom: isPhone ? 0 : 96,
+        width: isPhone ? "100%" : 420,
+        height: isPhone ? "90vh" : 620,
+        background: bg,
+        color: fg,
+        borderRadius: isPhone ? "16px 16px 0 0" : 16,
+        boxShadow: "0 24px 60px rgba(0,0,0,.25)",
+        display: "flex",
+        flexDirection: "column",
+        zIndex: 9999,
+
+        opacity: open ? 1 : 0,
+        transform: open
+          ? "translateY(0) scale(1)"
+          : "translateY(16px) scale(.94)",
+        transition:
+          "all 240ms cubic-bezier(0.2,0,0,1)",
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          padding: 16,
+          borderBottom: `1px solid ${border}`,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <strong>Sensihi Copilot</strong>
+        <button
+          onClick={() => {
+            setOpen(false)
+            setTimeout(() => setVisible(false), 240)
+          }}
           style={{
-            position: "fixed",
-            bottom: 90,
-            right: 24,
-            width: 380,
-            maxWidth: "calc(100vw - 48px)",
-            height: 520,
-            maxHeight: "calc(100vh - 120px)",
-            borderRadius: 16,
-            background: "#fff",
-            boxShadow: "0 8px 40px rgba(0,0,0,0.15)",
-            display: "flex",
-            flexDirection: "column",
-            zIndex: 9999,
-            overflow: "hidden"
+            border: "none",
+            background: "transparent",
+            fontSize: 18,
+            cursor: "pointer",
+            color: subtle,
           }}
         >
-          <div style={{ padding: 16, borderBottom: "1px solid #eee", background: "#fafafa" }}>
-            <div style={{ fontWeight: 600, marginBottom: 8 }}>Sensihi Copilot</div>
-            {/* Persona switch */}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {(["default", "founder", "sales", "technical"] as const).map(p => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setPersona(p)}
+          ✕
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div
+        style={{
+          flex: 1,
+          padding: 16,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+      >
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            style={{
+              alignSelf:
+                m.role === "user" ? "flex-end" : "flex-start",
+              background:
+                m.role === "user" ? "#111" : "#f2f2f2",
+              color: m.role === "user" ? "#fff" : "#111",
+              padding: "10px 14px",
+              borderRadius: 12,
+              maxWidth: "85%",
+            }}
+          >
+            {m.content}
+          </div>
+        ))}
+
+        {loading && (
+          <div style={{ color: subtle }}>Thinking…</div>
+        )}
+
+        {/* References (Insights / Blogs) */}
+        {refs.length > 0 && (
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>
+              Related insights
+            </div>
+            <div
+              style={{
+                display: "flex",
+                gap: 12,
+                overflowX: "auto",
+              }}
+            >
+              {refs.map((r, i) => (
+                <a
+                  key={i}
+                  href={r.url}
+                  target="_blank"
                   style={{
-                    padding: "6px 12px",
-                    borderRadius: 8,
-                    border: persona === p ? "2px solid #111" : "1px solid #ddd",
-                    background: persona === p ? "#111" : "#fff",
-                    color: persona === p ? "#fff" : "#333",
-                    fontSize: 12,
-                    cursor: "pointer",
-                    textTransform: "capitalize"
+                    minWidth: 220,
+                    padding: 12,
+                    borderRadius: 10,
+                    background: dark ? "#141414" : "#f6f6f6",
+                    textDecoration: "none",
+                    color: fg,
                   }}
                 >
-                  {p}
-                </button>
+                  {r.title}
+                </a>
               ))}
             </div>
           </div>
+        )}
 
-          <div
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Suggested Questions */}
+      <div
+        style={{
+          padding: "8px 16px",
+          overflowX: "auto",
+          display: "flex",
+          gap: 10,
+          borderTop: `1px solid ${border}`,
+        }}
+      >
+        {SUGGESTED_QUESTIONS.map((q) => (
+          <button
+            key={q}
+            onClick={() => sendMessage(q)}
             style={{
-              flex: 1,
-              overflow: "auto",
-              padding: 16,
-              display: "flex",
-              flexDirection: "column",
-              gap: 12
+              whiteSpace: "nowrap",
+              padding: "8px 14px",
+              borderRadius: 999,
+              border: `1px solid ${border}`,
+              background: "transparent",
+              cursor: "pointer",
+              transition: "all .15s",
             }}
+            onMouseOver={(e) =>
+              (e.currentTarget.style.borderColor = "#2f6bff")
+            }
+            onMouseOut={(e) =>
+              (e.currentTarget.style.borderColor = border)
+            }
           >
-            {messages.length === 0 && (
-              <div style={{ color: "#888", fontSize: 14 }}>
-                Ask about Sensihi — solutions, demos, or partnerships.
-              </div>
-            )}
-            {messages.map((m, i) => (
-              <div
-                key={i}
-                style={{
-                  alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                  maxWidth: "85%",
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  background: m.role === "user" ? "#111" : "#f0f0f0",
-                  color: m.role === "user" ? "#fff" : "#222",
-                  fontSize: 14
-                }}
-              >
-                {m.content}
-              </div>
-            ))}
-            {loading && (
-              <div style={{ alignSelf: "flex-start", padding: "10px 14px", color: "#666", fontSize: 14 }}>
-                …
-              </div>
-            )}
-            <div ref={bottomRef} />
-          </div>
+            {q}
+          </button>
+        ))}
+      </div>
 
-          {/* CTA */}
-          {cta && (
-            <div style={{ padding: "8px 16px", borderTop: "1px solid #eee" }}>
-              <a
-                href={cta.url}
-                style={{
-                  display: "block",
-                  padding: "10px 16px",
-                  borderRadius: 8,
-                  background: "#111",
-                  color: "#fff",
-                  textAlign: "center",
-                  textDecoration: "none",
-                  fontWeight: 600,
-                  fontSize: 14
-                }}
-              >
-                {cta.label}
-              </a>
-            </div>
-          )}
+      {/* Input */}
+      <div
+        style={{
+          padding: 12,
+          borderTop: `1px solid ${border}`,
+          display: "flex",
+          gap: 8,
+        }}
+      >
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) =>
+            e.key === "Enter" && sendMessage(input)
+          }
+          placeholder="Ask anything…"
+          style={{
+            flex: 1,
+            padding: "10px 14px",
+            borderRadius: 8,
+            border: `1px solid ${border}`,
+          }}
+        />
+        <button
+          onClick={() => sendMessage(input)}
+          style={{
+            padding: "10px 16px",
+            borderRadius: 8,
+            border: "none",
+            background: "#111",
+            color: "#fff",
+            fontWeight: 600,
+          }}
+        >
+          Send
+        </button>
+      </div>
 
-          <div style={{ padding: 12, borderTop: "1px solid #eee", display: "flex", gap: 8 }}>
-            <input
-              type="text"
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && sendMessage()}
-              placeholder="Ask anything…”
-              style={{
-                flex: 1,
-                padding: "10px 14px",
-                borderRadius: 8,
-                border: "1px solid #ddd",
-                fontSize: 14
-              }}
-            />
-            <button
-              type="button"
-              onClick={sendMessage}
-              disabled={loading}
-              style={{
-                padding: "10px 18px",
-                borderRadius: 8,
-                border: "none",
-                background: "#111",
-                color: "#fff",
-                fontWeight: 600,
-                cursor: loading ? "not-allowed" : "pointer",
-                opacity: loading ? 0.7 : 1
-              }}
-            >
-              Send
-            </button>
-          </div>
-        </div>
-      )}
-    </>
+      {/* Disclaimer */}
+      <div
+        style={{
+          padding: 12,
+          fontSize: 12,
+          color: subtle,
+          textAlign: "center",
+          borderTop: `1px solid ${border}`,
+        }}
+      >
+        This is a Gen-AI experiment. Responses are based only on
+        Sensihi insights and should be verified with cited sources.
+      </div>
+    </div>
   )
 }
+
+/* -------- Framer Controls -------- */
+addPropertyControls(SensihiCopilot, {
+  apiUrl: {
+    type: ControlType.String,
+    title: "API URL",
+    defaultValue:
+      "https://sensihi-copilot.vercel.app/api/copilot",
+  },
+})
 
 export default SensihiCopilot
