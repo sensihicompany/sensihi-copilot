@@ -5,10 +5,6 @@ export const config = {
   runtime: "edge"
 }
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-})
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "https://sensihi.com",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -16,7 +12,7 @@ const corsHeaders = {
 }
 
 export default async function handler(req: Request) {
-  // ✅ HANDLE PREFLIGHT
+  // ✅ CORS PREFLIGHT
   if (req.method === "OPTIONS") {
     return new Response(null, {
       status: 200,
@@ -24,6 +20,7 @@ export default async function handler(req: Request) {
     })
   }
 
+  // ❌ BLOCK EVERYTHING ELSE
   if (req.method !== "POST") {
     return new Response("Method Not Allowed", {
       status: 405,
@@ -32,6 +29,10 @@ export default async function handler(req: Request) {
   }
 
   try {
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY
+    })
+
     const { message, page, persona, sessionId } = await req.json()
 
     if (!message || !sessionId) {
@@ -60,9 +61,7 @@ export default async function handler(req: Request) {
     console.error("COPILOT_ERROR", err)
 
     return new Response(
-      JSON.stringify({
-        message: "Copilot temporarily unavailable"
-      }),
+      JSON.stringify({ message: "Copilot temporarily unavailable" }),
       {
         status: 500,
         headers: {
