@@ -1,5 +1,6 @@
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
+import crypto from "crypto"
 
 /* ----------------------------------
    CORS CONFIG (LOCKED)
@@ -36,6 +37,72 @@ const supabase = createClient(
 )
 
 /* ----------------------------------
+   RATE LIMITING (SAFE, NEW)
+---------------------------------- */
+
+const RATE_LIMIT_WINDOW_MS = 60_000 // 1 minute
+const MAX_REQUESTS_PER_IP = 10
+
+const ipBuckets = new Map<
+  string,
+  { count: number; resetAt: number }
+>()
+
+function checkRateLimit(ip: string) {
+  const now = Date.now()
+  const bucket = ipBuckets.get(ip)
+
+  if (!bucket || now > bucket.resetAt) {
+    ipBuckets.set(ip, {
+      count: 1,
+      resetAt: now + RATE_LIMIT_WINDOW_MS,
+    })
+    return true
+  }
+
+  if (bucket.count >= MAX_REQUESTS_PER_IP) {
+    return false
+  }
+
+  bucket.count++
+  return true
+}
+
+/* ----------------------------------
+   SESSION GUARD (SAFE, NEW)
+---------------------------------- */
+
+const MAX_MESSAGES_PER_SESSION = 40
+const sessionBuckets = new Map<string, number>()
+
+function getSessionId(req): string {
+  const headerSession = req.headers["x-session-id"]
+  if (typeof headerSession === "string") return headerSession
+
+  const ua = req.headers["user-agent"] || "unknown"
+  const ip =
+    (req.headers["x-forwarded-for"] as string)?.split(",")[0] ||
+    req.socket.remoteAddress ||
+    "unknown"
+
+  return crypto
+    .createHash("sha256")
+    .update(ua + ip)
+    .digest("hex")
+}
+
+function checkSessionLimit(sessionId: string) {
+  const count = sessionBuckets.get(sessionId) || 0
+
+  if (count >= MAX_MESSAGES_PER_SESSION) {
+    return false
+  }
+
+  sessionBuckets.set(sessionId, count + 1)
+  return true
+}
+
+/* ----------------------------------
    Helpers (SAFE)
 ---------------------------------- */
 
@@ -70,25 +137,18 @@ function formatAnswer(text: string) {
 
   let out = text.trim()
 
-  // 1. Ensure title is isolated
   out = out.replace(
     /^([A-Za-z0-9 ,\-()]+):\s*/m,
     "$1:\n\n"
   )
 
-  // 2. Force "Key Points:" onto its own line
   out = out.replace(
     /Key Points:\s*/gi,
     "\n\nKey Points:\n"
   )
 
-  // 3. Force each bullet onto a new line
   out = out.replace(/\s*•\s*/g, "\n• ")
-
-  // 4. Ensure spacing before bullet blocks
   out = out.replace(/\n•/g, "\n\n•")
-
-  // 5. Clean excessive newlines
   out = out.replace(/\n{3,}/g, "\n\n")
 
   return out.trim()
@@ -108,6 +168,33 @@ export default async function handler(req, res) {
 
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false })
+  }
+
+  /* ---------- NEW: Rate limit ---------- */
+  const ip =
+    (req.headers["x-forwarded-for"] as string)?.split(",")[0] ||
+    req.socket.remoteAddress ||
+    "unknown"
+
+  if (!checkRateLimit(ip)) {
+    return res.status(429).json({
+      ok: false,
+      message:
+        "You’re sending requests too quickly. Please wait a moment and try again.",
+      references: [],
+    })
+  }
+
+  /* ---------- NEW: Session guard ---------- */
+  const sessionId = getSessionId(req)
+
+  if (!checkSessionLimit(sessionId)) {
+    return res.status(429).json({
+      ok: false,
+      message:
+        "You’ve reached the maximum number of questions for this session. Please refresh the page or come back later.",
+      references: [],
+    })
   }
 
   try {
@@ -169,7 +256,7 @@ export default async function handler(req, res) {
       .join("\n\n")
 
     /* ----------------------------------
-       4. Generate answer (PLAIN TEXT)
+       4. Generate answer
     ---------------------------------- */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -184,19 +271,11 @@ Formatting rules (IMPORTANT):
 - Clear section titles followed by a colon
 - Blank line between sections
 - Use section titles on their own line
-- Do NOT attempt bold formatting
-- Bullet points can have short headings
 - Bullet points must use the "•" character
-- Short paragraphs, high clarity
+- Bullet points can have short headings
+- Short paragraphs, high clarity as ending below bullet points
 
-Answer structure:
-1. One-sentence explanation
-2. Key points as bullets
-
-Content rules:
-- Answer ONLY using provided context
-- Do NOT include citations or source numbers
-- Be confident, practical, and concise
+Answer ONLY using provided context.
           `.trim(),
         },
         {
@@ -207,7 +286,7 @@ Content rules:
     })
 
     /* ----------------------------------
-       5. CTA references (MAX 3, REAL ONLY)
+       5. CTA references (MAX 3)
     ---------------------------------- */
     const references = matches
       .filter((m) => isValidReference(m.metadata))
