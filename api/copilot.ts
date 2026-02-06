@@ -7,7 +7,33 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 })
 
+const ALLOWED_ORIGINS = new Set([
+  "https://sensihi.com",
+  "https://www.sensihi.com",
+  "https://sensihi-copilot.vercel.app"
+])
+
+function corsHeadersFor(req: Request) {
+  const origin = req.headers.get("origin") || ""
+  const allowOrigin = ALLOWED_ORIGINS.has(origin) ? origin : "https://sensihi.com"
+
+  return {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400"
+  }
+}
+
 export default async function handler(req: Request) {
+  // Handle browser preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: corsHeadersFor(req)
+    })
+  }
+
   if (req.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 })
   }
@@ -29,7 +55,7 @@ export default async function handler(req: Request) {
   return new Response(JSON.stringify(result), {
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "https://sensihi.com"
+      ...corsHeadersFor(req)
     }
   })
 }

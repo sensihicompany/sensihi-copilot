@@ -6,7 +6,7 @@
 
 import React, { useState, useCallback, useRef, useEffect } from "react"
 
-const COPILOT_API = "https://your-deployment.vercel.app/api/copilot" // Replace with your Vercel URL
+const COPILOT_API = "https://sensihi-copilot.vercel.app/api/copilot"
 
 function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36)
