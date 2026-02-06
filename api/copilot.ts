@@ -62,27 +62,33 @@ function isValidReference(meta?: any) {
 }
 
 /**
- * Enforce readable formatting regardless of model quirks
- * SAFE: text-only transform
+ * FINAL formatter — forces visual structure
+ * SAFE: text-only, zero logic impact
  */
 function formatAnswer(text: string) {
   if (!text) return text
 
   let out = text.trim()
 
-  // Ensure title is separated
+  // 1. Ensure title is isolated
   out = out.replace(
     /^([A-Za-z0-9 ,\-()]+):\s*/m,
     "$1:\n\n"
   )
 
-  // Force every bullet onto its own line
+  // 2. Force "Key Points:" onto its own line
+  out = out.replace(
+    /Key Points:\s*/gi,
+    "\n\nKey Points:\n"
+  )
+
+  // 3. Force each bullet onto a new line
   out = out.replace(/\s*•\s*/g, "\n• ")
 
-  // Add spacing before bullets block
+  // 4. Ensure spacing before bullet blocks
   out = out.replace(/\n•/g, "\n\n•")
 
-  // Clean up excessive whitespace
+  // 5. Clean excessive newlines
   out = out.replace(/\n{3,}/g, "\n\n")
 
   return out.trim()
