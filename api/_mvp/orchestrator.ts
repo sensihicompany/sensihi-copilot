@@ -2,13 +2,12 @@ import { vectorSearch } from "./vector.js"
 import {
   getSessionMemory,
   updateSessionMemory,
-  getLastContext,
   setLastContext,
+  getLastContext,
 } from "./memory.js"
 import {
   detectUserIntent,
   recommendNextActions,
-  summarizeForPersona,
 } from "./tools.js"
 import { scoreLead } from "./leadScore.js"
 import { trackEvent } from "./analytics.js"
@@ -20,7 +19,10 @@ import { trackEvent } from "./analytics.js"
 type AIClient = {
   chat: {
     completions: {
-      create: (opts: any) => Promise<{
+      create: (opts: {
+        model: string
+        messages: Array<{ role: "system" | "user"; content: string }>
+      }) => Promise<{
         choices: Array<{ message: { content: string | null } }>
       }>
     }
@@ -37,7 +39,6 @@ type Reference = {
 ---------------------------------- */
 
 const SITE_ORIGIN = "https://sensihi.com"
-const MAX_REFERENCES = 5
 
 /* ----------------------------------
    Helpers
@@ -65,23 +66,24 @@ function extractReferences(
 
   for (const d of docs) {
     const meta = d.metadata || {}
-    const url = normalizeUrl(meta.url || meta.href)
+    const rawUrl = meta.url || meta.href
+    const url = normalizeUrl(rawUrl)
+
     if (!url || seen.has(url)) continue
 
     seen.add(url)
     refs.push({
-      title:
-        meta.title ||
-        meta.heading ||
-        "Related Sensihi insight",
+      title: meta.title || meta.heading || "Related Sensihi insight",
       url,
     })
   }
 
-  return refs.slice(0, MAX_REFERENCES)
+  return refs.slice(0, 5)
 }
 
 function formatAnswer(text: string): string {
+  if (!text) return ""
+
   return text
     .replace(/\n{3,}/g, "\n\n")
     .replace(/•\s?/g, "• ")
@@ -89,7 +91,7 @@ function formatAnswer(text: string): string {
 }
 
 /* ----------------------------------
-   Orchestrator
+   Orchestrator (PRODUCTION)
 ---------------------------------- */
 
 export async function runCopilotV2({
@@ -111,7 +113,6 @@ export async function runCopilotV2({
 
   const { intent } = detectUserIntent(message)
   const memory = getSessionMemory(sessionId)
-  const previousContext = getLastContext(sessionId)
 
   /* ------------------------------
      2. Vector search
@@ -121,40 +122,39 @@ export async function runCopilotV2({
 
   try {
     docs = await vectorSearch(message)
-  } catch {
-    // Vector failures should never block Copilot
-    docs = []
+  } catch (err) {
+    console.error("VECTOR_SEARCH_FAILED", err)
   }
 
   /* ------------------------------
      3. Context resolution
-     (new results OR memory fallback)
   ------------------------------ */
 
-  const context =
-    docs
-      .map((d) => d.content)
-      .filter(Boolean)
-      .join("\n\n") || previousContext || ""
+  let context = docs
+    .map((d) => d.content)
+    .filter(Boolean)
+    .join("\n\n")
+
+  // Fallback to last context for follow-ups
+  if (!context) {
+    const last = getLastContext(sessionId)
+    if (last) context = last
+  }
 
   if (!context) {
-    updateSessionMemory(sessionId, message)
-
     return {
       message:
         "I don’t have relevant Sensihi information for that yet. Try asking about our solutions, insights, or working with Sensihi.",
       intent,
       references: [],
-      lead: scoreLead({
-        intent,
-        messageCount: memory.length + 1,
-        askedForDemo: message.toLowerCase().includes("demo"),
-      }),
+      lead: { score: 0, tier: "cold", signals: [] },
       cta: recommendNextActions(intent),
     }
   }
 
   setLastContext(sessionId, context)
+
+  const references = extractReferences(docs)
 
   /* ------------------------------
      4. LLM completion
@@ -173,10 +173,10 @@ You are Sensihi Copilot.
 
 Rules:
 - Answer ONLY using the provided information.
-- Do NOT invent facts.
-- Write clearly with short paragraphs.
-- Use practical, business-friendly language.
-- Do NOT mention internal sources or system behavior.
+- Do NOT invent facts or external knowledge.
+- Write clearly in short paragraphs.
+- Explain concepts in practical business language.
+- Never mention sources or internal mechanics.
 `,
         },
         ...memory.map((m) => ({
@@ -185,35 +185,35 @@ Rules:
         })),
         {
           role: "user",
-          content: context
-            ? `Information:\n${context}\n\nQuestion:\n${message}`
-            : message,
+          content: message,
         },
       ],
     })
 
-    answer =
-      completion.choices?.[0]?.message?.content ?? ""
-  } catch {
+    answer = completion.choices?.[0]?.message?.content ?? ""
+  } catch (err) {
+    console.error("OPENAI_FAILED", err)
     return {
       message:
-        "I’m temporarily unavailable. Please try again shortly.",
+        "I’m temporarily unavailable. Please try again in a moment.",
       intent,
       references: [],
+      lead: { score: 0, tier: "cold", signals: [] },
       cta: recommendNextActions(intent),
     }
   }
 
-  answer = summarizeForPersona(
-    formatAnswer(answer),
-    persona || ""
-  )
+  answer = formatAnswer(answer)
 
   /* ------------------------------
-     5. Memory + analytics
+     5. Memory update
   ------------------------------ */
 
   updateSessionMemory(sessionId, message)
+
+  /* ------------------------------
+     6. Lead scoring
+  ------------------------------ */
 
   const lead = scoreLead({
     intent,
@@ -221,23 +221,27 @@ Rules:
     askedForDemo: message.toLowerCase().includes("demo"),
   })
 
+  /* ------------------------------
+     7. Analytics (non-blocking)
+  ------------------------------ */
+
   trackEvent({
     type: "copilot_response",
     sessionId,
     intent,
     page,
     leadTier: lead.tier,
-    references: docs.length,
+    references: references.length,
   })
 
   /* ------------------------------
-     6. Final response
+     8. Final response
   ------------------------------ */
 
   return {
     message: answer,
     intent,
-    references: extractReferences(docs),
+    references,
     lead,
     cta: recommendNextActions(intent),
   }
