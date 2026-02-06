@@ -1,78 +1,78 @@
 /* ----------------------------------
-   Intent Detection
+   Intent detection
 ---------------------------------- */
+
 export function detectUserIntent(message: string) {
   const m = message.toLowerCase()
 
-  if (
-    m.includes("demo") ||
-    m.includes("pricing") ||
-    m.includes("contact") ||
-    m.includes("talk to") ||
-    m.includes("sales")
-  ) {
+  if (m.includes("demo") || m.includes("contact")) {
     return { intent: "high_intent_buyer" }
   }
 
-  if (m.includes("partner") || m.includes("collaborate")) {
-    return { intent: "partner" }
+  if (m.includes("pricing") || m.includes("cost")) {
+    return { intent: "pricing" }
   }
 
-  if (m.includes("career") || m.includes("job") || m.includes("hiring")) {
-    return { intent: "talent" }
+  if (m.includes("insight") || m.includes("blog") || m.includes("article")) {
+    return { intent: "research" }
+  }
+
+  if (m.includes("partner")) {
+    return { intent: "partner" }
   }
 
   return { intent: "exploring" }
 }
 
 /* ----------------------------------
-   CTA Recommendation (MULTI)
+   CTA recommendation (MULTI)
 ---------------------------------- */
-export function recommendNextAction(intent: string) {
+
+export function recommendNextActions(intent: string) {
   switch (intent) {
     case "high_intent_buyer":
       return [
-        {
-          label: "Contact us",
-          url: "/contact",
-        },
-        {
-          label: "View solutions",
-          url: "/solutions",
-        },
+        { label: "Contact Sensihi", url: "/contact", type: "primary" },
+        { label: "Explore Solutions", url: "/solutions", type: "secondary" },
       ]
 
-    case "partner":
+    case "research":
       return [
-        {
-          label: "Partner with Sensihi",
-          url: "/contact",
-        },
-        {
-          label: "Read insights",
-          url: "/insights",
-        },
+        { label: "Read Insights", url: "/insights", type: "primary" },
+        { label: "View Case Studies", url: "/insights", type: "secondary" },
       ]
 
-    case "talent":
+    case "pricing":
       return [
-        {
-          label: "Explore careers",
-          url: "/careers",
-        },
+        { label: "Talk to Us", url: "/contact", type: "primary" },
       ]
 
-    case "exploring":
     default:
       return [
-        {
-          label: "Read insights",
-          url: "/insights",
-        },
-        {
-          label: "Explore solutions",
-          url: "/solutions",
-        },
+        { label: "Explore Insights", url: "/insights", type: "primary" },
+        { label: "Contact Us", url: "/contact", type: "secondary" },
       ]
   }
+}
+
+/* ----------------------------------
+   Persona tone adjustment
+---------------------------------- */
+
+export function summarizeForPersona(content: string, persona: string) {
+  if (!content) return content
+
+  if (persona === "founder") {
+    return `From a founder’s perspective:\n\n${content}`
+  }
+
+  if (persona === "technical") {
+    return `From a technical standpoint:\n\n${content}`
+  }
+
+  if (persona === "sales") {
+    return `From a business outcomes view:\n\n${content}`
+  }
+
+  return content
 }

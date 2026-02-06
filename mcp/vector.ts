@@ -4,8 +4,9 @@ import { createClient } from "@supabase/supabase-js"
 /* ----------------------------------
    Clients (Edge-safe)
 ---------------------------------- */
+
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
 })
 
 const supabase = createClient(
@@ -14,27 +15,37 @@ const supabase = createClient(
 )
 
 /* ----------------------------------
-   Simple in-memory embedding cache
-   (Replace with KV / Redis later)
+   In-memory embedding cache
 ---------------------------------- */
+
 const embeddingCache = new Map<string, number[]>()
 
 /* ----------------------------------
-   Heuristic: should we even embed?
+   Heuristic: avoid wasteful embeddings
 ---------------------------------- */
+
 function shouldEmbed(query: string) {
   if (!query) return false
-  if (query.length < 15) return false // short / low-signal
+  if (query.length < 12) return false
   return true
 }
 
 /* ----------------------------------
-   Vector search (SAFE + CHEAP)
+   Vector search (REFERENCE READY)
 ---------------------------------- */
-export async function vectorSearch(query: string) {
-  if (!shouldEmbed(query)) {
-    return []
-  }
+
+export async function vectorSearch(query: string): Promise<
+  Array<{
+    content: string
+    metadata: {
+      url?: string
+      title?: string
+      type?: string
+    }
+    similarity?: number
+  }>
+> {
+  if (!shouldEmbed(query)) return []
 
   let embedding: number[] | undefined
 
@@ -45,46 +56,42 @@ export async function vectorSearch(query: string) {
     } else {
       const res = await openai.embeddings.create({
         model: "text-embedding-3-small",
-        input: query
+        input: query,
       })
-
       embedding = res.data?.[0]?.embedding
-      if (embedding) {
-        embeddingCache.set(query, embedding)
-      }
+      if (embedding) embeddingCache.set(query, embedding)
     }
   } catch (err: any) {
-    console.error(
-      "EMBEDDING_FAILED",
-      err?.code || err?.message || err
-    )
-    return [] // 👈 graceful fallback
+    console.error("EMBEDDING_FAILED", err?.message || err)
+    return []
   }
 
   if (!embedding) return []
 
-  /* -------- Supabase vector search -------- */
+  /* -------- Supabase RPC -------- */
   try {
     const { data, error } = await supabase.rpc(
       "match_sensihi_documents",
       {
         query_embedding: embedding,
-        match_threshold: 0.75,
-        match_count: 5
+        match_threshold: 0.72,
+        match_count: 8,
       }
     )
 
-    if (error) {
+    if (error || !Array.isArray(data)) {
       console.error("SUPABASE_VECTOR_ERROR", error)
       return []
     }
 
-    return Array.isArray(data) ? data : []
-  } catch (err: any) {
-    console.error(
-      "VECTOR_SEARCH_FAILED",
-      err?.message || err
+    // Filter weak / empty rows
+    return data.filter(
+      (d: any) =>
+        typeof d.content === "string" &&
+        d.content.length > 80
     )
-    return [] // 👈 never crash
+  } catch (err: any) {
+    console.error("VECTOR_SEARCH_FAILED", err?.message || err)
+    return []
   }
 }

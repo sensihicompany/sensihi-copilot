@@ -7,6 +7,7 @@ import { trackEvent } from "./analytics"
 /* ----------------------------------
    Types
 ---------------------------------- */
+
 type AIClient = {
   chat: {
     completions: {
@@ -17,66 +18,84 @@ type AIClient = {
   }
 }
 
-type VectorDoc = {
-  content?: string
-  metadata?: {
-    url?: string
-    title?: string
-    type?: string
-  }
-  similarity?: number
+type Reference = {
+  title: string
+  url: string
 }
 
 /* ----------------------------------
-   Extract article / insight references
+   Constants
 ---------------------------------- */
-function extractReferences(docs: VectorDoc[]) {
+
+const SITE_ORIGIN = "https://sensihi.com"
+
+/* ----------------------------------
+   Helpers
+---------------------------------- */
+
+function normalizeUrl(url?: string): string | null {
+  if (!url) return null
+
+  // Absolute URL
+  if (url.startsWith("http")) {
+    return url.startsWith(SITE_ORIGIN) ? url : null
+  }
+
+  // Relative → absolute
+  if (url.startsWith("/")) {
+    return `${SITE_ORIGIN}${url}`
+  }
+
+  return null
+}
+
+function extractReferences(
+  docs: Array<{ metadata?: any }>
+): Reference[] {
   const seen = new Set<string>()
+  const refs: Reference[] = []
 
-  return docs
-    .map(d => d.metadata)
-    .filter(
-      m =>
-        m?.url &&
-        m?.title &&
-        !seen.has(m.url) &&
-        seen.add(m.url)
-    )
-    .slice(0, 4)
-    .map(m => ({
-      title: m!.title!,
-      url: m!.url!
-    }))
-}
+  for (const d of docs) {
+    const meta = d.metadata || {}
+    const rawUrl = meta.url || meta.href
+    const url = normalizeUrl(rawUrl)
 
-/* ----------------------------------
-   Build LLM context
----------------------------------- */
-function buildContext(docs: VectorDoc[]) {
-  const chunks = docs
-    .map(d => d.content)
-    .filter(Boolean)
+    if (!url || seen.has(url)) continue
 
-  if (chunks.length === 0) {
-    return `
-Sensihi helps organizations apply AI responsibly and effectively
-to real business workflows, improving decision-making, automating
-processes, and scaling intelligence across teams.
-`
+    seen.add(url)
+    refs.push({
+      title:
+        meta.title ||
+        meta.heading ||
+        "Related Sensihi insight",
+      url,
+    })
   }
 
-  return chunks.join("\n\n")
+  return refs.slice(0, 5)
+}
+
+function formatAnswer(text: string): string {
+  if (!text) return ""
+
+  // Normalize excessive whitespace
+  let formatted = text
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/•\s?/g, "• ")
+
+  return formatted.trim()
 }
 
 /* ----------------------------------
-   Main Copilot Orchestrator
+   Orchestrator
 ---------------------------------- */
+
 export async function runCopilotV2({
   message,
   page,
   persona,
   sessionId,
-  aiClient
+  aiClient,
 }: {
   message: string
   page?: string
@@ -84,25 +103,50 @@ export async function runCopilotV2({
   sessionId: string
   aiClient: AIClient
 }) {
-  /* -------- 1. Intent + memory -------- */
+  /* ------------------------------
+     1. Intent + memory
+  ------------------------------ */
+
   const { intent } = detectUserIntent(message)
   const memory = getSessionMemory(sessionId)
 
-  /* -------- 2. Vector search -------- */
-  let docs: VectorDoc[] = []
+  /* ------------------------------
+     2. Vector search
+  ------------------------------ */
+
+  let docs: Array<{ content?: string; metadata?: any }> = []
 
   try {
     docs = await vectorSearch(message)
   } catch (err) {
     console.error("VECTOR_SEARCH_FAILED", err)
-    docs = []
   }
 
-  /* -------- 3. Context + references -------- */
-  const context = buildContext(docs)
+  /* ------------------------------
+     3. Context + references
+  ------------------------------ */
+
+  const context = docs
+    .map((d) => d.content)
+    .filter(Boolean)
+    .join("\n\n")
+
   const references = extractReferences(docs)
 
-  /* -------- 4. OpenAI completion -------- */
+  if (!context) {
+    return {
+      message:
+        "I don’t have relevant Sensihi information for that yet. Try asking about our solutions, insights, or working with Sensihi.",
+      intent,
+      references: [],
+      cta: recommendNextAction(intent),
+    }
+  }
+
+  /* ------------------------------
+     4. LLM completion
+  ------------------------------ */
+
   let answer = ""
 
   try {
@@ -112,92 +156,80 @@ export async function runCopilotV2({
         {
           role: "system",
           content: `
-You are Sensihi’s website copilot.
-
-Your role:
-- Help visitors understand Sensihi’s offerings, insights, and expertise.
-- Use Sensihi articles, blogs, and case studies as grounding when available.
+You are Sensihi Copilot.
 
 Rules:
-- If a question is general (e.g., “What is prototyping?”), explain it briefly in plain language.
-- Then relate the concept back to how Sensihi applies or thinks about it.
-- NEVER say “not in the provided context” or similar phrases.
-- Do not invent facts about Sensihi.
-- Prefer practical, business-focused explanations over theory.
-- Keep answers concise but helpful.
-
-Tone:
-- Clear
-- Confident
-- Professional
-- Not academic
-`
+- Answer ONLY using the provided context.
+- Do NOT invent facts or external knowledge.
+- Write in clear paragraphs with line breaks.
+- If relevant, explain concepts in a practical business context.
+- Do NOT mention the word "context" in your reply.
+- Do NOT apologize for missing data.
+`,
         },
-        ...memory.map(m => ({
+        ...memory.map((m) => ({
           role: "user" as const,
-          content: m
+          content: m,
         })),
         {
           role: "user",
-          content: `Context:\n${context}\n\nQuestion:\n${message}`
-        }
-      ]
+          content: `Context:\n${context}\n\nQuestion:\n${message}`,
+        },
+      ],
     })
 
     answer =
-      completion.choices?.[0]?.message?.content ??
-      "How can I help you with Sensihi?"
-  } catch (err: any) {
-    console.error("OPENAI_COMPLETION_FAILED", err?.code || err?.message)
-
+      completion.choices?.[0]?.message?.content ?? ""
+  } catch (err) {
+    console.error("OPENAI_FAILED", err)
     return {
       message:
-        "I’m temporarily at capacity right now. Please try again in a moment.",
+        "I’m temporarily unavailable. Please try again in a moment.",
       intent,
-      confidence: "low",
+      references: [],
       cta: recommendNextAction(intent),
-      references
     }
   }
 
-  /* -------- 5. Update session memory -------- */
-  try {
-    updateSessionMemory(sessionId, message)
-  } catch (err) {
-    console.error("SESSION_MEMORY_UPDATE_FAILED", err)
-  }
+  answer = formatAnswer(answer)
 
-  /* -------- 6. Lead scoring -------- */
-  let lead
+  /* ------------------------------
+     5. Memory update
+  ------------------------------ */
+
+  updateSessionMemory(sessionId, message)
+
+  /* ------------------------------
+     6. Lead scoring + analytics
+  ------------------------------ */
+
+  let lead = { score: 0, tier: "cold" }
 
   try {
     lead = scoreLead({
       intent,
       messageCount: memory.length + 1,
-      askedForDemo: message.toLowerCase().includes("demo")
+      askedForDemo: message.toLowerCase().includes("demo"),
     })
-  } catch {
-    lead = { score: 0, tier: "cold" }
-  }
+  } catch {}
 
-  /* -------- 7. Analytics (non-blocking) -------- */
-  try {
-    await trackEvent({
-      sessionId,
-      intent,
-      page,
-      leadTier: lead.tier
-    })
-  } catch {
-    /* ignore */
-  }
+  trackEvent({
+    sessionId,
+    intent,
+    page,
+    leadTier: lead.tier,
+    references: references.length,
+  })
 
-  /* -------- 8. Final response -------- */
+  /* ------------------------------
+     7. Final response
+  ------------------------------ */
+
   return {
     message: answer,
     intent,
+    references,
     lead,
     cta: recommendNextAction(intent),
-    references
   }
 }

@@ -1,11 +1,8 @@
 /**
- * Seed sensihi_documents with content + embeddings.
- *
- * Usage:
- *   node scripts/seed-embeddings.ts [path/to/content.json]
- *
- * Safe for one-time / occasional runs.
- * NOT used at runtime.
+ * Sensihi Copilot — Seed Embeddings
+ * - Crawls URLs or loads manual chunks
+ * - Extracts title + content
+ * - Stores reference-grade metadata for citations
  */
 
 import "dotenv/config"
@@ -13,101 +10,138 @@ import { readFileSync } from "fs"
 import { resolve } from "path"
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
+import { JSDOM } from "jsdom"
 
 /* ----------------------------------
    Env validation
 ---------------------------------- */
+
 const {
   OPENAI_API_KEY,
   SUPABASE_URL,
-  SUPABASE_SERVICE_KEY
+  SUPABASE_SERVICE_KEY,
 } = process.env
 
 if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error("Missing env vars. Check .env")
-  process.exit(1)
-}
-
-if (OPENAI_API_KEY.startsWith("sk-xxxx")) {
-  console.error("OPENAI_API_KEY looks like a placeholder")
+  console.error("❌ Missing env vars. Check .env")
   process.exit(1)
 }
 
 /* ----------------------------------
-   Clients (Node runtime)
+   Clients
 ---------------------------------- */
+
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY })
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 /* ----------------------------------
-   Config (tunable)
+   Config
 ---------------------------------- */
+
 const EMBEDDING_MODEL = "text-embedding-3-small"
-const CHUNK_MAX_CHARS = 800
-const CHUNK_OVERLAP = 100
-const MAX_CONCURRENCY = 3 // protects quota
-const DRY_RUN = false     // set true to test without inserts
+const MAX_CHARS = 800
+const OVERLAP = 120
 
 /* ----------------------------------
    Types
 ---------------------------------- */
+
 interface Chunk {
   content: string
-  metadata?: Record<string, unknown>
+  metadata: {
+    url: string
+    title: string
+    type: "insight" | "blog" | "case-study" | "page"
+  }
 }
 
 interface SeedInput {
-  chunks?: Chunk[]
   urls?: string[]
+  chunks?: Chunk[]
 }
 
 /* ----------------------------------
    Helpers
 ---------------------------------- */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+
+function cleanText(text: string) {
+  return text
     .replace(/\s+/g, " ")
+    .replace(/\n{2,}/g, "\n\n")
     .trim()
 }
 
-async function fetchTextFromUrl(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "SensihiCopilot-Seed/1.0" }
-  })
-  if (!res.ok) throw new Error(`Fetch failed: ${url} (${res.status})`)
-  return stripHtml(await res.text())
-}
+function splitChunks(
+  text: string,
+  baseMeta: Chunk["metadata"]
+): Chunk[] {
+  const out: Chunk[] = []
+  let cursor = 0
 
-function splitIntoChunks(text: string, metadata?: Record<string, unknown>): Chunk[] {
-  const chunks: Chunk[] = []
-  let current = ""
-
-  for (const para of text.split(/\n\n+/)) {
-    const p = para.trim()
-    if (!p) continue
-
-    if (current.length + p.length <= CHUNK_MAX_CHARS) {
-      current += (current ? "\n\n" : "") + p
-    } else {
-      chunks.push({ content: current, metadata })
-      current = current.slice(-CHUNK_OVERLAP) + "\n\n" + p
-    }
+  while (cursor < text.length) {
+    out.push({
+      content: text.slice(cursor, cursor + MAX_CHARS),
+      metadata: baseMeta,
+    })
+    cursor += MAX_CHARS - OVERLAP
   }
 
-  if (current) chunks.push({ content: current, metadata })
-  return chunks
+  return out
+}
+
+function inferType(url: string): Chunk["metadata"]["type"] {
+  if (url.includes("/insights/")) return "insight"
+  if (url.includes("/blog")) return "blog"
+  if (url.includes("/case")) return "case-study"
+  return "page"
 }
 
 /* ----------------------------------
-   Embedding (quota-safe)
+   Fetch + extract
 ---------------------------------- */
-async function embed(text: string): Promise<number[]> {
+
+async function fetchAndExtract(url: string): Promise<Chunk[]> {
+  const res = await fetch(url, {
+    headers: { "User-Agent": "SensihiCopilotBot/1.0" },
+  })
+
+  if (!res.ok) throw new Error(`Failed ${url}`)
+
+  const html = await res.text()
+  const dom = new JSDOM(html)
+  const doc = dom.window.document
+
+  const title =
+    doc.querySelector("meta[property='og:title']")?.getAttribute("content") ||
+    doc.querySelector("title")?.textContent ||
+    doc.querySelector("h1")?.textContent ||
+    "Sensihi Insight"
+
+  const paragraphs = Array.from(
+    doc.querySelectorAll("main p, article p")
+  )
+    .map((p) => p.textContent || "")
+    .join("\n\n")
+
+  const text = cleanText(paragraphs)
+
+  if (!text || text.length < 200) return []
+
+  return splitChunks(text, {
+    url,
+    title: title.trim(),
+    type: inferType(url),
+  })
+}
+
+/* ----------------------------------
+   Embedding
+---------------------------------- */
+
+async function embed(text: string) {
   const res = await openai.embeddings.create({
     model: EMBEDDING_MODEL,
-    input: text.slice(0, 8000)
+    input: text.slice(0, 8000),
   })
   return res.data[0].embedding
 }
@@ -115,75 +149,57 @@ async function embed(text: string): Promise<number[]> {
 /* ----------------------------------
    Main
 ---------------------------------- */
-async function main() {
-  const jsonPath = resolve(process.cwd(), process.argv[2] || "scripts/seed-content.json")
-  const input = JSON.parse(readFileSync(jsonPath, "utf-8")) as SeedInput
 
-  const chunks: Chunk[] = [...(input.chunks || [])]
+async function main() {
+  const inputPath = resolve(
+    process.cwd(),
+    process.argv[2] || "scripts/seed-content.json"
+  )
+
+  const input: SeedInput = JSON.parse(
+    readFileSync(inputPath, "utf-8")
+  )
+
+  let chunks: Chunk[] = []
 
   if (input.urls?.length) {
+    console.log(`🔍 Crawling ${input.urls.length} URLs`)
     for (const url of input.urls) {
       try {
-        const text = await fetchTextFromUrl(url)
-        chunks.push(...splitIntoChunks(text, { url }))
-        console.log("Fetched:", url)
+        const extracted = await fetchAndExtract(url)
+        chunks.push(...extracted)
+        console.log(`✓ ${url} → ${extracted.length} chunks`)
       } catch (err) {
-        console.warn("Skip URL:", url, err)
+        console.warn(`⚠️ Skip ${url}`)
       }
     }
   }
 
+  if (input.chunks?.length) {
+    chunks.push(...input.chunks)
+  }
+
   if (!chunks.length) {
-    console.error("No content to seed.")
-    return
+    console.error("❌ No content to seed")
+    process.exit(1)
   }
 
-  console.log(`Seeding ${chunks.length} chunk(s)...`)
-  console.log(`Estimated embedding calls: ${chunks.length}`)
-  if (DRY_RUN) {
-    console.log("DRY RUN — no inserts will be made")
-    return
+  console.log(`🧠 Embedding ${chunks.length} chunks`)
+
+  for (const chunk of chunks) {
+    const embedding = await embed(chunk.content)
+
+    await supabase.from("sensihi_documents").insert({
+      content: chunk.content,
+      embedding,
+      metadata: chunk.metadata,
+    })
   }
 
-  let inserted = 0
-
-  for (let i = 0; i < chunks.length; i += MAX_CONCURRENCY) {
-    const batch = chunks.slice(i, i + MAX_CONCURRENCY)
-
-    await Promise.all(
-      batch.map(async (chunk) => {
-        const content = chunk.content.trim()
-        if (!content) return
-
-        // Idempotency: skip if content already exists
-        const { count } = await supabase
-          .from("sensihi_documents")
-          .select("*", { count: "exact", head: true })
-          .eq("content", content)
-
-        if (count && count > 0) return
-
-        try {
-          const embedding = await embed(content)
-          const { error } = await supabase.from("sensihi_documents").insert({
-            content,
-            embedding,
-            metadata: chunk.metadata ?? null
-          })
-          if (!error) inserted++
-        } catch (err) {
-          console.error("Failed chunk:", err)
-        }
-      })
-    )
-
-    console.log(`Progress: ${Math.min(i + MAX_CONCURRENCY, chunks.length)}/${chunks.length}`)
-  }
-
-  console.log("Done. Inserted", inserted, "new row(s).")
+  console.log("✅ Seeding complete")
 }
 
-main().catch(err => {
-  console.error("Fatal:", err)
+main().catch((err) => {
+  console.error(err)
   process.exit(1)
 })
