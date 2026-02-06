@@ -1,8 +1,10 @@
 /**
- * Sensihi Copilot — Seed Embeddings
- * - Crawls URLs or loads manual chunks
- * - Extracts title + content
- * - Stores reference-grade metadata for citations
+ * Sensihi Copilot — Seed Embeddings (MANUAL / CURATED)
+ * - Loads URLs or manual chunks
+ * - Framer-safe content extraction
+ * - Stores reference-grade metadata
+ *
+ * ⚠️ ADMIN SCRIPT — NEVER RUN IN PROD RUNTIME
  */
 
 import "dotenv/config"
@@ -16,14 +18,10 @@ import { JSDOM } from "jsdom"
    Env validation
 ---------------------------------- */
 
-const {
-  OPENAI_API_KEY,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_KEY,
-} = process.env
+const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY } = process.env
 
 if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error("❌ Missing env vars. Check .env")
+  console.error("❌ Missing env vars")
   process.exit(1)
 }
 
@@ -41,17 +39,21 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 const EMBEDDING_MODEL = "text-embedding-3-small"
 const MAX_CHARS = 800
 const OVERLAP = 120
+const MIN_TEXT_LENGTH = 200
 
 /* ----------------------------------
    Types
 ---------------------------------- */
+
+type DocType = "insight" | "blog" | "case-study" | "page"
 
 interface Chunk {
   content: string
   metadata: {
     url: string
     title: string
-    type: "insight" | "blog" | "case-study" | "page"
+    type: DocType
+    source: "manual"
   }
 }
 
@@ -64,73 +66,80 @@ interface SeedInput {
    Helpers
 ---------------------------------- */
 
-function cleanText(text: string) {
-  return text
-    .replace(/\s+/g, " ")
-    .replace(/\n{2,}/g, "\n\n")
-    .trim()
+function normalizeUrl(url: string) {
+  return url.replace(/\/$/, "")
 }
 
-function splitChunks(
-  text: string,
-  baseMeta: Chunk["metadata"]
-): Chunk[] {
-  const out: Chunk[] = []
-  let cursor = 0
-
-  while (cursor < text.length) {
-    out.push({
-      content: text.slice(cursor, cursor + MAX_CHARS),
-      metadata: baseMeta,
-    })
-    cursor += MAX_CHARS - OVERLAP
-  }
-
-  return out
-}
-
-function inferType(url: string): Chunk["metadata"]["type"] {
+function inferType(url: string): DocType {
   if (url.includes("/insights/")) return "insight"
   if (url.includes("/blog")) return "blog"
   if (url.includes("/case")) return "case-study"
   return "page"
 }
 
+function cleanText(text: string) {
+  return text.replace(/\s+/g, " ").trim()
+}
+
+function splitChunks(
+  text: string,
+  metadata: Chunk["metadata"]
+): Chunk[] {
+  const out: Chunk[] = []
+  let i = 0
+
+  while (i < text.length) {
+    out.push({
+      content: text.slice(i, i + MAX_CHARS),
+      metadata,
+    })
+    i += MAX_CHARS - OVERLAP
+  }
+
+  return out
+}
+
 /* ----------------------------------
-   Fetch + extract
+   Fetch + extract (Framer-safe)
 ---------------------------------- */
 
 async function fetchAndExtract(url: string): Promise<Chunk[]> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "SensihiCopilotBot/1.0" },
+  const normalized = normalizeUrl(url)
+
+  const res = await fetch(normalized, {
+    headers: { "User-Agent": "SensihiCopilotSeeder/1.0" },
   })
 
-  if (!res.ok) throw new Error(`Failed ${url}`)
+  if (!res.ok) throw new Error(`Failed ${normalized}`)
 
   const html = await res.text()
   const dom = new JSDOM(html)
   const doc = dom.window.document
 
+  doc
+    .querySelectorAll("script,style,nav,footer,header")
+    .forEach(el => el.remove())
+
   const title =
     doc.querySelector("meta[property='og:title']")?.getAttribute("content") ||
     doc.querySelector("title")?.textContent ||
     doc.querySelector("h1")?.textContent ||
-    "Sensihi Insight"
+    "Sensihi"
 
-  const paragraphs = Array.from(
-    doc.querySelectorAll("main p, article p")
+  // Framer-safe extraction
+  const text = cleanText(
+    Array.from(doc.querySelectorAll("main, article, section"))
+      .map(el => el.textContent || "")
+      .join("\n\n")
   )
-    .map((p) => p.textContent || "")
-    .join("\n\n")
 
-  const text = cleanText(paragraphs)
-
-  if (!text || text.length < 200) return []
+  if (!text || text.length < MIN_TEXT_LENGTH) return []
 
   return splitChunks(text, {
-    url,
+    url: normalized,
     title: title.trim(),
-    type: inferType(url),
+    type: inferType(normalized),
+    source: "manual",
   })
 }
 
@@ -138,7 +147,7 @@ async function fetchAndExtract(url: string): Promise<Chunk[]> {
    Embedding
 ---------------------------------- */
 
-async function embed(text: string) {
+async function embed(text: string): Promise<number[]> {
   const res = await openai.embeddings.create({
     model: EMBEDDING_MODEL,
     input: text.slice(0, 8000),
@@ -163,13 +172,13 @@ async function main() {
   let chunks: Chunk[] = []
 
   if (input.urls?.length) {
-    console.log(`🔍 Crawling ${input.urls.length} URLs`)
+    console.log(`🔍 Seeding ${input.urls.length} URLs`)
     for (const url of input.urls) {
       try {
         const extracted = await fetchAndExtract(url)
         chunks.push(...extracted)
         console.log(`✓ ${url} → ${extracted.length} chunks`)
-      } catch (err) {
+      } catch {
         console.warn(`⚠️ Skip ${url}`)
       }
     }
@@ -196,10 +205,10 @@ async function main() {
     })
   }
 
-  console.log("✅ Seeding complete")
+  console.log("✅ Manual seeding complete")
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error(err)
   process.exit(1)
 })

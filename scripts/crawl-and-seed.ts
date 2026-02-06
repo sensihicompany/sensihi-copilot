@@ -1,10 +1,8 @@
 /**
- * Sensihi Copilot — Crawl & Seed
- *
- * Crawls sensihi.com (including /insights),
- * extracts meaningful content, chunks it,
- * embeds it, and upserts into Supabase
- * with reference-grade metadata.
+ * Sensihi Copilot — Crawl & Seed (STABLE)
+ * Crawls sensihi.com + /insights,
+ * extracts readable content,
+ * chunks, embeds, and stores in Supabase.
  *
  * ⚠️ ADMIN SCRIPT — NEVER RUN IN PROD RUNTIME
  */
@@ -18,11 +16,7 @@ import { JSDOM } from "jsdom"
    Environment
 ---------------------------------- */
 
-const {
-  OPENAI_API_KEY,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_KEY,
-} = process.env
+const { OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY } = process.env
 
 if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error("❌ Missing environment variables")
@@ -34,11 +28,13 @@ if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 ---------------------------------- */
 
 const BASE_URL = "https://sensihi.com"
-const MAX_PAGES = 80                 // increased for /insights
+const INSIGHTS_URL = "https://sensihi.com/insights"
+
+const MAX_PAGES = 80
 const MIN_TEXT_LENGTH = 250
 
-const CHUNK_SIZE = 900
-const CHUNK_OVERLAP = 150
+const CHUNK_SIZE = 800
+const CHUNK_OVERLAP = 120
 
 const EMBEDDING_MODEL = "text-embedding-3-small"
 
@@ -68,72 +64,65 @@ function isInternal(url: string) {
   return url.startsWith(BASE_URL)
 }
 
-function inferType(url: string): "page" | "insight" | "blog" | "case-study" {
+function inferType(url: string): "insight" | "blog" | "case-study" | "page" {
   if (url.includes("/insights/")) return "insight"
   if (url.includes("/blog")) return "blog"
   if (url.includes("/case")) return "case-study"
   return "page"
 }
 
-/* ----------------------------------
-   Fetch
----------------------------------- */
-
 async function fetchHtml(url: string): Promise<string> {
   const res = await fetch(url, {
-    headers: { "User-Agent": "SensihiCopilotCrawler/1.0" }
+    headers: { "User-Agent": "SensihiCrawler/1.0" },
   })
 
   if (!res.ok) {
-    throw new Error(`Failed ${url} (${res.status})`)
+    throw new Error(`Fetch failed ${res.status}`)
   }
 
   return res.text()
 }
 
 /* ----------------------------------
-   ✅ LINK EXTRACTION (Framer-safe)
+   Link extraction (Framer-safe)
 ---------------------------------- */
 
 function extractLinks(html: string, currentUrl: string): string[] {
   const dom = new JSDOM(html, { url: currentUrl })
   const anchors = Array.from(dom.window.document.querySelectorAll("a"))
 
-  return Array.from(
-    new Set(
-      anchors
-        .map(a => a.getAttribute("href"))
-        .filter(Boolean)
-        .map(href => {
-          try {
-            return normalizeUrl(new URL(href!, currentUrl).toString())
-          } catch {
-            return null
-          }
-        })
-        .filter(
-          (url): url is string =>
-            !!url &&
-            isInternal(url) &&
-            !url.includes("#") &&
-            !url.includes("?") &&
-            !url.endsWith(".pdf")
-        )
+  const links = anchors
+    .map(a => a.getAttribute("href"))
+    .filter(Boolean)
+    .map(href => {
+      try {
+        return normalizeUrl(new URL(href!, currentUrl).toString())
+      } catch {
+        return null
+      }
+    })
+    .filter(
+      (url): url is string =>
+        !!url &&
+        isInternal(url) &&
+        !url.includes("#") &&
+        !url.includes("?") &&
+        !url.endsWith(".pdf")
     )
-  )
+
+  return Array.from(new Set(links))
 }
 
 /* ----------------------------------
-   CONTENT EXTRACTION (HIGH SIGNAL)
+   Content extraction (Framer-aware)
 ---------------------------------- */
 
 function extractContent(html: string) {
   const dom = new JSDOM(html)
   const doc = dom.window.document
 
-  // Remove noise
   doc
-    .querySelectorAll("script,style,nav,footer,header,aside")
+    .querySelectorAll("script,style,nav,footer,header")
     .forEach(el => el.remove())
 
   const title =
@@ -142,17 +131,18 @@ function extractContent(html: string) {
     doc.querySelector("h1")?.textContent ||
     "Sensihi"
 
-  const text = Array.from(
-    doc.querySelectorAll("main p, article p, section p")
+  // Framer-safe: grab readable blocks
+  const blocks = Array.from(
+    doc.querySelectorAll("main, article, section")
   )
-    .map(p => p.textContent || "")
+    .map(el => el.textContent || "")
     .join("\n\n")
     .replace(/\s+/g, " ")
     .trim()
 
   return {
     title: title.trim(),
-    text,
+    text: blocks,
   }
 }
 
@@ -162,11 +152,11 @@ function extractContent(html: string) {
 
 function chunkText(text: string): string[] {
   const chunks: string[] = []
-  let cursor = 0
+  let i = 0
 
-  while (cursor < text.length) {
-    chunks.push(text.slice(cursor, cursor + CHUNK_SIZE))
-    cursor += CHUNK_SIZE - CHUNK_OVERLAP
+  while (i < text.length) {
+    chunks.push(text.slice(i, i + CHUNK_SIZE))
+    i += CHUNK_SIZE - CHUNK_OVERLAP
   }
 
   return chunks
@@ -215,9 +205,12 @@ async function crawl(url: string) {
 ---------------------------------- */
 
 async function main() {
-  console.log("🚀 Starting crawl:", BASE_URL)
+  console.log("🚀 Starting crawl")
 
+  // 🔒 Seed known important roots
   await crawl(normalizeUrl(BASE_URL))
+  await crawl(normalizeUrl(INSIGHTS_URL))
+
   console.log(`📄 Discovered ${discovered.length} pages`)
 
   for (const url of discovered) {
@@ -238,16 +231,17 @@ async function main() {
       try {
         const embedding = await embed(content)
 
-        await supabase.from("sensihi_documents").upsert({
+        await supabase.from("sensihi_documents").insert({
           content,
           embedding,
           metadata: {
             url,
             title,
             type,
+            source: "crawl",
           },
         })
-      } catch {
+      } catch (err) {
         console.error("❌ Embed failed:", url)
       }
     }
@@ -257,6 +251,6 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error("💥 Fatal error:", err)
+  console.error("Fatal error:", err)
   process.exit(1)
 })

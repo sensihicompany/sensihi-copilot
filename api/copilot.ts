@@ -1,78 +1,102 @@
-import type { VercelRequest, VercelResponse } from "@vercel/node"
-import { runCopilotV2 } from "./_mvp/orchestrator.js"
+import OpenAI from "openai"
+import { createClient } from "@supabase/supabase-js"
 
-/* ----------------------------------
-   CORS Configuration
----------------------------------- */
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+})
 
-const ALLOWED_ORIGINS = [
-  "https://sensihi.com",
-  "https://www.sensihi.com",
-  "https://sensihi.framer.website",
-]
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_KEY!
+)
 
-function setCorsHeaders(req: VercelRequest, res: VercelResponse) {
-  const origin = req.headers.origin || ""
-
-  if (ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin)
-  }
-
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
-  res.setHeader("Access-Control-Max-Age", "86400")
-}
-
-/* ----------------------------------
-   API Handler
----------------------------------- */
-
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-) {
-  setCorsHeaders(req, res)
-
-  // Handle CORS preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end()
-  }
-
-  // Allow POST only
-  if (req.method !== "POST") {
-    return res.status(405).json({
-      ok: false,
-      error: "Method not allowed",
-    })
-  }
-
+export default async function handler(req, res) {
   try {
-    const { message, sessionId, page, persona } = req.body || {}
+    const { message } = req.body
+    if (!message) {
+      return res.status(400).json({ ok: false })
+    }
 
-    if (!message || typeof message !== "string") {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing or invalid `message`",
+    /* ----------------------------------
+       1. Embed the query
+    ---------------------------------- */
+    const embeddingRes = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: message,
+    })
+
+    const queryEmbedding = embeddingRes.data[0].embedding
+
+    /* ----------------------------------
+       2. Vector search in Postgres
+    ---------------------------------- */
+    const { data: matches, error } = await supabase.rpc(
+      "match_sensihi_documents",
+      {
+        query_embedding: queryEmbedding,
+        match_threshold: 0.15,
+        match_count: 6,
+      }
+    )
+
+    if (error) {
+      console.error(error)
+      throw error
+    }
+
+    if (!matches || matches.length === 0) {
+      return res.json({
+        ok: true,
+        message:
+          "I don’t have relevant Sensihi information for that yet. Try asking about our solutions, insights, or working with Sensihi.",
+        intent: "exploring",
+        references: [],
       })
     }
 
-    const result = await runCopilotV2({
-      message,
-      sessionId: sessionId || "anonymous",
-      page,
-      persona,
+    /* ----------------------------------
+       3. Build context
+    ---------------------------------- */
+    const context = matches
+      .map(
+        (m, i) =>
+          `Source ${i + 1}:\n${m.content}\nURL: ${m.metadata?.url}`
+      )
+      .join("\n\n")
+
+    /* ----------------------------------
+       4. Answer with citations
+    ---------------------------------- */
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are Sensihi Copilot. Answer ONLY using the provided sources. Cite sources.",
+        },
+        {
+          role: "user",
+          content: `Question: ${message}\n\nSources:\n${context}`,
+        },
+      ],
     })
 
-    return res.status(200).json({
+    return res.json({
       ok: true,
-      ...result,
+      message: completion.choices[0].message.content,
+      references: matches.map((m) => ({
+        title: m.metadata?.title || "Sensihi",
+        url: m.metadata?.url,
+      })),
     })
-  } catch (err: any) {
-    console.error("COPILOT_HANDLER_ERROR", err)
-
-    return res.status(500).json({
-      ok: false,
-      error: "Internal server error",
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({
+      ok: true,
+      message:
+        "I ran into a temporary issue. Please try again in a moment.",
+      references: [],
     })
   }
 }
