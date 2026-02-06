@@ -44,7 +44,6 @@ function isValidReference(meta?: any) {
 
   const url = meta.url.toLowerCase()
 
-  // Remove navigation / generic pages
   if (
     url === "https://sensihi.com" ||
     url.endsWith("/") ||
@@ -60,6 +59,25 @@ function isValidReference(meta?: any) {
     url.includes("/blog") ||
     url.includes("/case")
   )
+}
+
+/**
+ * Enforce readable formatting regardless of model quirks
+ * SAFE: text-only transform
+ */
+function formatAnswer(text: string) {
+  if (!text) return text
+
+  return text
+    // Ensure section titles start on new lines
+    .replace(/([A-Za-z][A-Za-z\s]+):\s*/g, "\n$1:\n")
+
+    // Force bullets onto new lines
+    .replace(/•\s*/g, "\n• ")
+
+    // Clean excessive breaks
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
 }
 
 /* ----------------------------------
@@ -96,13 +114,13 @@ export default async function handler(req, res) {
     const queryEmbedding = embeddingRes.data[0].embedding
 
     /* ----------------------------------
-       2. Vector search (RELAXED, SAFE)
+       2. Vector search (LOCKED WORKING VALUES)
     ---------------------------------- */
     const { data: matches, error } = await supabase.rpc(
       "match_sensihi_documents",
       {
         query_embedding: queryEmbedding,
-        match_threshold: 0.15, // 🔒 reverted to working value
+        match_threshold: 0.15,
         match_count: 6,
       }
     )
@@ -126,7 +144,7 @@ export default async function handler(req, res) {
     }
 
     /* ----------------------------------
-       3. Build grounded context (NO FILTER DROP)
+       3. Build grounded context
     ---------------------------------- */
     const context = matches
       .slice(0, 4)
@@ -145,25 +163,24 @@ export default async function handler(req, res) {
         {
           role: "system",
           content: `
-        You are Sensihi Copilot.
-        
-        Formatting rules (IMPORTANT):
-        - Do NOT use markdown (**, ##, -, or *)
-        - Use plain text only
-        - Use clear section titles followed by a colon
-        - Add a blank line between sections
-        - Use bullet points with the "•" character
-        - Keep paragraphs short and readable
-        
-        Answer structure:
-        1. Title line (short, clear)
-        2. One-sentence explanation
-        3. Key points listed clearly
-        
-        Content rules:
-        - Answer ONLY using the provided context
-        - Do NOT include citations, source numbers, or references in the text
-        - Be confident, simple, and practical
+You are Sensihi Copilot.
+
+Formatting rules (IMPORTANT):
+- Plain text only (no markdown)
+- Clear section titles followed by a colon
+- Blank line between sections
+- Bullet points must use the "•" character
+- Short paragraphs, high clarity
+
+Answer structure:
+1. Short title
+2. One-sentence explanation
+3. Key points as bullets
+
+Content rules:
+- Answer ONLY using provided context
+- Do NOT include citations or source numbers
+- Be confident, practical, and concise
           `.trim(),
         },
         {
@@ -186,7 +203,9 @@ export default async function handler(req, res) {
 
     return res.json({
       ok: true,
-      message: completion.choices[0].message.content,
+      message: formatAnswer(
+        completion.choices[0].message.content
+      ),
       references,
     })
   } catch (err) {
