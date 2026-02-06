@@ -1,6 +1,31 @@
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
 
+/* ----------------------------------
+   CORS CONFIG
+---------------------------------- */
+
+const ALLOWED_ORIGINS = [
+  "https://sensihi.com",
+  "https://www.sensihi.com",
+]
+
+function setCors(res, origin?: string) {
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin)
+  }
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  )
+  res.setHeader("Access-Control-Allow-Credentials", "true")
+}
+
+/* ----------------------------------
+   Clients
+---------------------------------- */
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 })
@@ -10,10 +35,27 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY!
 )
 
+/* ----------------------------------
+   Handler
+---------------------------------- */
+
 export default async function handler(req, res) {
+  const origin = req.headers.origin
+  setCors(res, origin)
+
+  /* ---- Handle preflight ---- */
+  if (req.method === "OPTIONS") {
+    return res.status(200).end()
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false })
+  }
+
   try {
     const { message } = req.body
-    if (!message) {
+
+    if (!message || typeof message !== "string") {
       return res.status(400).json({ ok: false })
     }
 
@@ -28,7 +70,7 @@ export default async function handler(req, res) {
     const queryEmbedding = embeddingRes.data[0].embedding
 
     /* ----------------------------------
-       2. Vector search in Postgres
+       2. Vector search
     ---------------------------------- */
     const { data: matches, error } = await supabase.rpc(
       "match_sensihi_documents",
@@ -40,7 +82,7 @@ export default async function handler(req, res) {
     )
 
     if (error) {
-      console.error(error)
+      console.error("RPC error:", error)
       throw error
     }
 
@@ -51,11 +93,15 @@ export default async function handler(req, res) {
           "I don’t have relevant Sensihi information for that yet. Try asking about our solutions, insights, or working with Sensihi.",
         intent: "exploring",
         references: [],
+        cta: [
+          { label: "Explore Insights", url: "/insights", type: "primary" },
+          { label: "Contact Us", url: "/contact", type: "secondary" },
+        ],
       })
     }
 
     /* ----------------------------------
-       3. Build context
+       3. Build grounded context
     ---------------------------------- */
     const context = matches
       .map(
@@ -65,7 +111,7 @@ export default async function handler(req, res) {
       .join("\n\n")
 
     /* ----------------------------------
-       4. Answer with citations
+       4. Generate answer
     ---------------------------------- */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -73,7 +119,7 @@ export default async function handler(req, res) {
         {
           role: "system",
           content:
-            "You are Sensihi Copilot. Answer ONLY using the provided sources. Cite sources.",
+            "You are Sensihi Copilot. Answer ONLY using the provided sources. Cite sources when relevant.",
         },
         {
           role: "user",
@@ -91,8 +137,8 @@ export default async function handler(req, res) {
       })),
     })
   } catch (err) {
-    console.error(err)
-    res.status(500).json({
+    console.error("Copilot error:", err)
+    return res.status(500).json({
       ok: true,
       message:
         "I ran into a temporary issue. Please try again in a moment.",
