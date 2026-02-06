@@ -6,57 +6,63 @@ export const config = {
 }
 
 /* ----------------------------------
-   CORS (lock this down later)
+   CORS configuration
 ---------------------------------- */
 const ALLOWED_ORIGINS = [
   "https://sensihi.com",
   "https://www.sensihi.com"
 ]
 
-function getCorsHeaders(origin: string | null) {
+function corsHeaders(origin: string | null) {
   const allowOrigin =
-    origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]
+    origin && ALLOWED_ORIGINS.includes(origin)
+      ? origin
+      : ALLOWED_ORIGINS[0]
 
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
     "Vary": "Origin"
   }
 }
 
 /* ----------------------------------
-   Optional: very light rate limiting
+   Very light in-memory rate limiting
+   (per session, Edge-safe)
 ---------------------------------- */
-const rateLimitMap = new Map<string, number[]>()
+const RATE_WINDOW_MS = 60_000
+const MAX_REQUESTS = 20
+const rateLimitStore = new Map<string, number[]>()
 
 function isRateLimited(sessionId: string) {
   const now = Date.now()
-  const WINDOW_MS = 60_000
-  const MAX_REQ = 20
+  const timestamps = rateLimitStore.get(sessionId) || []
 
-  const timestamps = rateLimitMap.get(sessionId) || []
-  const recent = timestamps.filter(t => now - t < WINDOW_MS)
-
-  if (recent.length >= MAX_REQ) return true
+  const recent = timestamps.filter(t => now - t < RATE_WINDOW_MS)
+  if (recent.length >= MAX_REQUESTS) {
+    rateLimitStore.set(sessionId, recent)
+    return true
+  }
 
   recent.push(now)
-  rateLimitMap.set(sessionId, recent)
+  rateLimitStore.set(sessionId, recent)
   return false
 }
 
 /* ----------------------------------
-   Handler
+   Request handler
 ---------------------------------- */
 export default async function handler(req: Request) {
   const origin = req.headers.get("origin")
-  const corsHeaders = getCorsHeaders(origin)
+  const headers = corsHeaders(origin)
 
-  /* -------- CORS preflight -------- */
+  /* -------- Preflight -------- */
   if (req.method === "OPTIONS") {
     return new Response(null, {
       status: 200,
-      headers: corsHeaders
+      headers
     })
   }
 
@@ -64,22 +70,22 @@ export default async function handler(req: Request) {
   if (req.method !== "POST") {
     return new Response("Method Not Allowed", {
       status: 405,
-      headers: corsHeaders
+      headers
     })
   }
 
-  /* -------- Parse body safely -------- */
-  let body: any
+  /* -------- Parse JSON -------- */
+  let payload: any
   try {
-    body = await req.json()
+    payload = await req.json()
   } catch {
     return new Response(
       JSON.stringify({ error: "Invalid JSON body" }),
-      { status: 400, headers: corsHeaders }
+      { status: 400, headers }
     )
   }
 
-  const { message, page, persona, sessionId } = body || {}
+  const { message, page, persona, sessionId } = payload ?? {}
 
   if (
     typeof message !== "string" ||
@@ -88,31 +94,32 @@ export default async function handler(req: Request) {
   ) {
     return new Response(
       JSON.stringify({ error: "Invalid request payload" }),
-      { status: 400, headers: corsHeaders }
+      { status: 400, headers }
     )
   }
 
-  /* -------- Rate limit (per session) -------- */
+  /* -------- Rate limit -------- */
   if (isRateLimited(sessionId)) {
     return new Response(
       JSON.stringify({
-        message: "You're sending messages a bit too fast. Please try again shortly."
+        message:
+          "You're sending messages too quickly. Please wait a moment and try again."
       }),
-      { status: 429, headers: corsHeaders }
+      { status: 429, headers }
     )
   }
 
   /* -------- OpenAI client -------- */
-  const openaiApiKey = process.env.OPENAI_API_KEY
-  if (!openaiApiKey) {
-    console.error("OPENAI_API_KEY missing")
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) {
+    console.error("OPENAI_API_KEY is missing")
     return new Response(
-      JSON.stringify({ message: "Server misconfiguration" }),
-      { status: 500, headers: corsHeaders }
+      JSON.stringify({ message: "Server configuration error" }),
+      { status: 500, headers }
     )
   }
 
-  const openai = new OpenAI({ apiKey: openaiApiKey })
+  const openai = new OpenAI({ apiKey })
 
   /* -------- Run Copilot -------- */
   try {
@@ -127,21 +134,22 @@ export default async function handler(req: Request) {
     return new Response(JSON.stringify(result), {
       status: 200,
       headers: {
-        ...corsHeaders,
+        ...headers,
         "Content-Type": "application/json"
       }
     })
   } catch (err) {
-    console.error("COPILOT_HANDLER_ERROR", err)
+    console.error("COPILOT_RUNTIME_ERROR", err)
 
     return new Response(
       JSON.stringify({
-        message: "Copilot is temporarily unavailable. Please try again shortly."
+        message:
+          "Copilot is temporarily unavailable. Please try again shortly."
       }),
       {
         status: 500,
         headers: {
-          ...corsHeaders,
+          ...headers,
           "Content-Type": "application/json"
         }
       }
