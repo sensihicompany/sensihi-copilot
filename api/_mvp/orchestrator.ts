@@ -1,8 +1,13 @@
-import { vectorSearch } from "./vector.js"
-import { getSessionMemory, updateSessionMemory } from "./memory.js"
-import { detectUserIntent, recommendNextAction } from "./tools.js"
-import { scoreLead } from "./leadScore.js"
-import { trackEvent } from "./analytics.js"
+// import { vectorSearch } from "./vector.js"
+// import { getSessionMemory, updateSessionMemory } from "./memory.js"
+// import { detectUserIntent, recommendNextAction } from "./tools.js"
+// import { scoreLead } from "./leadScore.js"
+// import { trackEvent } from "./analytics.js"
+
+export function runCopilotV2() {
+  return { ok: true }
+}
+
 
 /* ----------------------------------
    Types
