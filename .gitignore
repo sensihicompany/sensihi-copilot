@@ -1,0 +1,17 @@
+# Environment and secrets — never commit
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Seed content (copy from seed-content.example.json; may contain custom URLs/content)
+scripts/seed-content.json
+
+# Dependencies and build
+node_modules/
+.vercel
+
+# OS and editor
+.DS_Store
+*.log
+*.tgz

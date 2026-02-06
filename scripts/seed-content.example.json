@@ -1,0 +1,15 @@
+{
+  "chunks": [
+    {
+      "content": "Sensihi helps teams make better decisions with AI-powered analytics and insights.",
+      "metadata": { "url": "/", "title": "Home" }
+    },
+    {
+      "content": "Book a demo to see how Sensihi can transform your workflow. Our team will show you a personalized walkthrough.",
+      "metadata": { "url": "/contact", "title": "Contact" }
+    }
+  ],
+  "urls": [
+    "https://sensihi.com/"
+  ]
+}
