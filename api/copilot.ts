@@ -1,29 +1,44 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node"
-import OpenAI from "openai"
 import { runCopilotV2 } from "./_mvp/orchestrator.js"
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-})
+/* ----------------------------------
+   CORS Configuration
+---------------------------------- */
+
+const ALLOWED_ORIGINS = [
+  "https://sensihi.com",
+  "https://www.sensihi.com",
+  "https://sensihi.framer.website",
+]
+
+function setCorsHeaders(req: VercelRequest, res: VercelResponse) {
+  const origin = req.headers.origin || ""
+
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin)
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
+  res.setHeader("Access-Control-Max-Age", "86400")
+}
+
+/* ----------------------------------
+   API Handler
+---------------------------------- */
 
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
-  /* ----------------------------------
-     Health check (GET)
-  ---------------------------------- */
-  if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      service: "sensihi-copilot",
-      status: "alive",
-    })
+  setCorsHeaders(req, res)
+
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end()
   }
 
-  /* ----------------------------------
-     Method guard
-  ---------------------------------- */
+  // Allow POST only
   if (req.method !== "POST") {
     return res.status(405).json({
       ok: false,
@@ -31,32 +46,21 @@ export default async function handler(
     })
   }
 
-  /* ----------------------------------
-     Validate payload
-  ---------------------------------- */
-  const { message, sessionId, page, persona } = req.body ?? {}
-
-  if (
-    typeof message !== "string" ||
-    message.trim().length === 0 ||
-    typeof sessionId !== "string"
-  ) {
-    return res.status(400).json({
-      ok: false,
-      error: "Invalid request payload",
-    })
-  }
-
-  /* ----------------------------------
-     Run Copilot
-  ---------------------------------- */
   try {
+    const { message, sessionId, page, persona } = req.body || {}
+
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing or invalid `message`",
+      })
+    }
+
     const result = await runCopilotV2({
       message,
-      sessionId,
+      sessionId: sessionId || "anonymous",
       page,
       persona,
-      aiClient: openai,
     })
 
     return res.status(200).json({
@@ -64,11 +68,11 @@ export default async function handler(
       ...result,
     })
   } catch (err: any) {
-    console.error("COPILOT_FATAL_ERROR", err)
+    console.error("COPILOT_HANDLER_ERROR", err)
 
     return res.status(500).json({
       ok: false,
-      error: "Copilot execution failed",
+      error: "Internal server error",
     })
   }
 }
