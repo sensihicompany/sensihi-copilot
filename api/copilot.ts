@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node"
+import { runCopilotV2 } from "./_mvp/orchestrator.js"
 
 export default async function handler(
   req: VercelRequest,
@@ -6,7 +7,6 @@ export default async function handler(
 ) {
   res.status(200).json({
     ok: true,
-    message: "Copilot function is alive",
-    method: req.method,
+    orchestratorType: typeof runCopilotV2,
   })
 }
