@@ -1,8 +1,8 @@
-import { vectorSearch } from "./vector"
-import { getSessionMemory, updateSessionMemory } from "./memory"
-import { detectUserIntent, recommendNextAction } from "./tools"
-import { scoreLead } from "./leadScore"
-import { trackEvent } from "./analytics"
+import { vectorSearch } from "./vector.js"
+import { getSessionMemory, updateSessionMemory } from "./memory.js"
+import { detectUserIntent, recommendNextAction } from "./tools.js"
+import { scoreLead } from "./leadScore.js"
+import { trackEvent } from "./analytics.js"
 
 /* ----------------------------------
    Types
