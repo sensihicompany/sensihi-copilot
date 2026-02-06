@@ -183,13 +183,13 @@ Formatting rules (IMPORTANT):
 - Plain text only (no markdown)
 - Clear section titles followed by a colon
 - Blank line between sections
+- Bullet points can have heading in bold
 - Bullet points must use the "•" character
 - Short paragraphs, high clarity
 
 Answer structure:
-1. Short title
-2. One-sentence explanation
-3. Key points as bullets
+1. One-sentence explanation
+2. Key points as bullets
 
 Content rules:
 - Answer ONLY using provided context
