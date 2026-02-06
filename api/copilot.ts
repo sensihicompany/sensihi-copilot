@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node"
 import OpenAI from "openai"
-import { runCopilotV2 } from "./_mcp/orchestrator.js"
+import { runCopilotV2 } from "./_mvp/orchestrator.js"
 
 /* ----------------------------------
    CORS
