@@ -183,7 +183,9 @@ Formatting rules (IMPORTANT):
 - Plain text only (no markdown)
 - Clear section titles followed by a colon
 - Blank line between sections
-- Bullet points can have heading in bold
+- Use section titles on their own line
+- Do NOT attempt bold formatting
+- Bullet points can have short headings
 - Bullet points must use the "•" character
 - Short paragraphs, high clarity
 
