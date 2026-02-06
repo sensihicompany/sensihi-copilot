@@ -1,65 +1,82 @@
 import OpenAI from "openai"
-import { createClient } from "@supabase/supabase-js"
+import { createClient, SupabaseClient } from "@supabase/supabase-js"
 
 /* ----------------------------------
-   Clients (Edge-safe)
+   Lazy clients (SAFE)
 ---------------------------------- */
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
+let openai: OpenAI | null = null
+let supabase: SupabaseClient | null = null
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-)
+function getOpenAI() {
+  if (!openai) {
+    const key = process.env.OPENAI_API_KEY
+    if (!key) {
+      throw new Error("OPENAI_API_KEY missing")
+    }
+    openai = new OpenAI({ apiKey: key })
+  }
+  return openai
+}
 
-/* ----------------------------------
-   In-memory embedding cache
----------------------------------- */
+function getSupabase() {
+  const url = process.env.SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_KEY
 
-const embeddingCache = new Map<string, number[]>()
+  if (!url || !key) {
+    throw new Error("Supabase env vars missing")
+  }
 
-/* ----------------------------------
-   Heuristic: avoid wasteful embeddings
----------------------------------- */
+  if (!supabase) {
+    supabase = createClient(url, key)
+  }
 
-function shouldEmbed(query: string) {
-  if (!query) return false
-  if (query.length < 12) return false
-  return true
+  return supabase
 }
 
 /* ----------------------------------
-   Vector search (REFERENCE READY)
+   In-memory embedding cache (bounded)
 ---------------------------------- */
 
-export async function vectorSearch(query: string): Promise<
-  Array<{
-    content: string
-    metadata: {
-      url?: string
-      title?: string
-      type?: string
-    }
-    similarity?: number
-  }>
-> {
+const embeddingCache = new Map<string, number[]>()
+const MAX_CACHE_SIZE = 100
+
+function cacheEmbedding(query: string, embedding: number[]) {
+  embeddingCache.set(query, embedding)
+  if (embeddingCache.size > MAX_CACHE_SIZE) {
+    const firstKey = embeddingCache.keys().next().value
+    embeddingCache.delete(firstKey)
+  }
+}
+
+/* ----------------------------------
+   Heuristic
+---------------------------------- */
+
+function shouldEmbed(query: string) {
+  return !!query && query.length >= 12
+}
+
+/* ----------------------------------
+   Vector search
+---------------------------------- */
+
+export async function vectorSearch(query: string) {
   if (!shouldEmbed(query)) return []
 
   let embedding: number[] | undefined
 
-  /* -------- Embedding (cached) -------- */
+  /* -------- Embedding -------- */
   try {
     if (embeddingCache.has(query)) {
       embedding = embeddingCache.get(query)
     } else {
-      const res = await openai.embeddings.create({
+      const res = await getOpenAI().embeddings.create({
         model: "text-embedding-3-small",
         input: query,
       })
       embedding = res.data?.[0]?.embedding
-      if (embedding) embeddingCache.set(query, embedding)
+      if (embedding) cacheEmbedding(query, embedding)
     }
   } catch (err: any) {
     console.error("EMBEDDING_FAILED", err?.message || err)
@@ -70,7 +87,7 @@ export async function vectorSearch(query: string): Promise<
 
   /* -------- Supabase RPC -------- */
   try {
-    const { data, error } = await supabase.rpc(
+    const { data, error } = await getSupabase().rpc(
       "match_sensihi_documents",
       {
         query_embedding: embedding,
@@ -84,7 +101,6 @@ export async function vectorSearch(query: string): Promise<
       return []
     }
 
-    // Filter weak / empty rows
     return data.filter(
       (d: any) =>
         typeof d.content === "string" &&
