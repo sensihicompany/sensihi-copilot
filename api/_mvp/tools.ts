@@ -2,7 +2,7 @@
    Intent detection
 ---------------------------------- */
 
-export function detectUserIntent(message: string) {
+export function detectUserIntent(message: string): { intent: string } {
   const m = message.toLowerCase()
 
   if (m.includes("demo") || m.includes("contact")) {
@@ -25,7 +25,7 @@ export function detectUserIntent(message: string) {
 }
 
 /* ----------------------------------
-   CTA recommendation (MULTI)
+   CTA recommendation (SINGULAR)
 ---------------------------------- */
 
 export function recommendNextAction(intent: string) {
@@ -59,8 +59,11 @@ export function recommendNextAction(intent: string) {
    Persona tone adjustment
 ---------------------------------- */
 
-export function summarizeForPersona(content: string, persona: string) {
-  if (!content) return content
+export function summarizeForPersona(
+  content: string,
+  persona?: string
+): string {
+  if (!content || !persona) return content
 
   if (persona === "founder") {
     return `From a founder’s perspective:\n\n${content}`

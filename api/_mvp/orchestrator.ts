@@ -2,12 +2,12 @@ import { vectorSearch } from "./vector.js"
 import {
   getSessionMemory,
   updateSessionMemory,
-  setLastContext,
   getLastContext,
+  setLastContext,
 } from "./memory.js"
 import {
   detectUserIntent,
-  recommendNextActions,
+  recommendNextAction,
   summarizeForPersona,
 } from "./tools.js"
 import { scoreLead } from "./leadScore.js"
@@ -119,14 +119,10 @@ export async function runCopilotV2({
      3. Context resolution
   ------------------------------ */
 
-  let context = docs
-    .map((d) => d.content)
-    .filter(Boolean)
-    .join("\n\n")
-
-  if (!context) {
-    context = getLastContext(sessionId) || ""
-  }
+  let context =
+    docs.map((d) => d.content).filter(Boolean).join("\n\n") ||
+    getLastContext(sessionId) ||
+    ""
 
   if (!context) {
     updateSessionMemory(sessionId, message)
@@ -137,7 +133,7 @@ export async function runCopilotV2({
       intent,
       references: [],
       lead: { score: 0, tier: "cold", signals: [] },
-      cta: recommendNextActions(intent),
+      cta: recommendNextAction(intent),
     }
   }
 
@@ -155,11 +151,8 @@ export async function runCopilotV2({
       messages: [
         {
           role: "system",
-          content: `
-You are Sensihi Copilot.
-Answer using ONLY the provided information.
-Be clear, practical, and business-focused.
-`,
+          content:
+            "You are Sensihi Copilot. Answer clearly and practically using only the provided information.",
         },
         ...memory.map((m) => ({
           role: "user" as const,
@@ -182,7 +175,7 @@ Be clear, practical, and business-focused.
       intent,
       references: [],
       lead: { score: 0, tier: "cold", signals: [] },
-      cta: recommendNextActions(intent),
+      cta: recommendNextAction(intent),
     }
   }
 
@@ -219,6 +212,6 @@ Be clear, practical, and business-focused.
     intent,
     references: extractReferences(docs),
     lead,
-    cta: recommendNextActions(intent),
+    cta: recommendNextAction(intent),
   }
 }
